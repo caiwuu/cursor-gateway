@@ -258,7 +258,7 @@ class NodeRecord:
     provision_prompt: str = ""
     account_client_type: str = "ide"
     account_client_version: str = "3.19.13"
-    account_workspace: str = "/tmp/sand-account"
+    account_workspace: str = ""  # 空 = 不向 Agent 声明工作区
     agent_host: str = DEFAULT_AGENT_HOST
     provision_state: dict[str, Any] = field(default_factory=dict)
     notes: str = ""

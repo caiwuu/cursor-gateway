@@ -35,7 +35,10 @@ from .credentials import UpstreamError  # noqa: E402
 AGENT_PATH = "/agent.v1.AgentService/Run"
 AGENT_CLIENT_VERSION = "3.19.13"
 AGENT_MODE_ASK = 2
-DEFAULT_WORKSPACE = "/tmp/sand-account"
+# 默认不声明工作区：API 调用方没有本地目录，声明了模型就会拿这个假路径去调
+# 调用方的 Glob/Read。旧节点里存的占位路径同样视为"没有工作区"。
+DEFAULT_WORKSPACE = ""
+LEGACY_PLACEHOLDER_WORKSPACE = "/tmp/sand-account"
 # 调用方工具在 Agent 侧的 MCP provider 标识；exec 回来时据此识别
 MCP_PROVIDER = "client-tools"
 # 请求以 tool 结果收尾时，本轮 run 仍需要一条 user 消息
@@ -73,20 +76,18 @@ def _conv_state() -> bytes:
 
 
 def _workspace() -> str:
-    return getattr(_tls, "workspace", None) or DEFAULT_WORKSPACE
+    ws = (getattr(_tls, "workspace", None) or DEFAULT_WORKSPACE).strip()
+    return "" if ws == LEGACY_PLACEHOLDER_WORKSPACE else ws
 
 
 def _req_env() -> bytes:
     workspace = _workspace()
-    return (
-        P.pb_str(1, "darwin")
-        + P.pb_str(2, workspace)
-        + P.pb_str(3, "/bin/zsh")
-        + P.pb_bool(5, False)
-        + P.pb_str(10, "Asia/Shanghai")
-        + P.pb_str(11, workspace)
-        + P.pb_str(21, workspace)
-    )
+    body = P.pb_str(1, "darwin") + P.pb_str(3, "/bin/zsh") + P.pb_bool(5, False)
+    body += P.pb_str(10, "Asia/Shanghai")
+    if workspace:
+        # workspace_paths(2) / project_folder(11) / process_working_directory(21)
+        body += P.pb_str(2, workspace) + P.pb_str(11, workspace) + P.pb_str(21, workspace)
+    return body
 
 
 def _tool_defs() -> list[bytes]:

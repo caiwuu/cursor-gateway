@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     provision_prompt TEXT NOT NULL DEFAULT '',
     account_client_type TEXT NOT NULL DEFAULT 'ide',
     account_client_version TEXT NOT NULL DEFAULT '3.19.13',
-    account_workspace TEXT NOT NULL DEFAULT '/tmp/sand-account',
+    account_workspace TEXT NOT NULL DEFAULT '',
     agent_host TEXT NOT NULL DEFAULT 'agentn.global.api5.cursor.sh',
     provision_state TEXT NOT NULL DEFAULT '{}',
     notes TEXT NOT NULL DEFAULT '',

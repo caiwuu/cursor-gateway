@@ -127,7 +127,7 @@ def _row_to_node(row) -> NodeRecord:
         provision_prompt=row["provision_prompt"] or "",
         account_client_type=row["account_client_type"] or "ide",
         account_client_version=row["account_client_version"] or "3.19.13",
-        account_workspace=row["account_workspace"] or "/tmp/sand-account",
+        account_workspace=row["account_workspace"] or "",
         agent_host=row["agent_host"] or "agentn.global.api5.cursor.sh",
         provision_state=state,
         notes=row["notes"] or "",
@@ -476,7 +476,7 @@ class Store:
                     payload.get("account_client_version") or "3.19.13"
                 ),
                 account_workspace=str(
-                    payload.get("account_workspace") or "/tmp/sand-account"
+                    payload.get("account_workspace") or ""
                 ),
                 agent_host=str(
                     payload.get("agent_host") or "agentn.global.api5.cursor.sh"
