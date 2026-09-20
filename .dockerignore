@@ -1,0 +1,15 @@
+.git
+.gitignore
+.DS_Store
+.env
+.env.*
+data
+*.db
+*.db-shm
+*.db-wal
+web/node_modules
+web/dist
+.venv
+__pycache__
+*.pyc
+README.md
