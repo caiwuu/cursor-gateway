@@ -34,7 +34,11 @@ from .credentials import UpstreamError  # noqa: E402
 
 AGENT_PATH = "/agent.v1.AgentService/Run"
 AGENT_CLIENT_VERSION = "3.19.13"
+# agent.v1.AgentMode：1=AGENT 2=ASK 3=PLAN。Ask 会禁止一切写操作，模型直接拒绝
+# 调用方的 Write/Edit 类工具，所以固定用 AGENT。
+AGENT_MODE_AGENT = 1
 AGENT_MODE_ASK = 2
+AGENT_MODE = AGENT_MODE_AGENT
 # 默认不声明工作区：API 调用方没有本地目录，声明了模型就会拿这个假路径去调
 # 调用方的 Glob/Read。旧节点里存的占位路径同样视为"没有工作区"。
 DEFAULT_WORKSPACE = ""
@@ -72,7 +76,7 @@ def _requested_model(model_id: str) -> bytes:
 
 def _conv_state() -> bytes:
     now = int(time.time() * 1000)
-    return P.pb_enum(10, AGENT_MODE_ASK) + pb_u64(26, now) + P.pb_str(27, "Asia/Shanghai")
+    return P.pb_enum(10, AGENT_MODE) + pb_u64(26, now) + P.pb_str(27, "Asia/Shanghai")
 
 
 def _workspace() -> str:
@@ -287,7 +291,7 @@ def _mcp_exec_event(args: dict, index: int) -> dict[str, Any]:
 
 
 def _user_message(text: str) -> bytes:
-    return P.pb_str(1, text) + P.pb_str(2, str(uuid.uuid4())) + P.pb_enum(4, AGENT_MODE_ASK)
+    return P.pb_str(1, text) + P.pb_str(2, str(uuid.uuid4())) + P.pb_enum(4, AGENT_MODE)
 
 
 def _hist_text(text: str) -> bytes:
