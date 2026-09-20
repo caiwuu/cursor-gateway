@@ -80,11 +80,11 @@ export default function Models() {
         title="模型"
         desc={
           hasOfficial
-            ? "本站单价用于扣费。接入 Cursor 时若和官方模型重名，给它起个别名；/v1/models 会返回别名，请求按别名路由到真实模型。"
-            : "客户端填模型 id 即可。接入 Cursor 时若和官方模型重名，在右侧填别名，刷新模型列表后就不会撞名。"
+            ? "本站单价用于扣费。别名给 OpenAI 兼容客户端用。Cursor 里必须打开 Use OpenAI API Key 和 Override Base URL，指向本站 /v1，并新开对话，否则会报 Model name is not valid。"
+            : "curl / SDK 填别名即可路由到真实模型。Cursor 还要打开 Use OpenAI API Key + Override Base URL（指到本站 /v1）并新开对话，只改模型名会报 Model name is not valid。"
         }
         extra={
-          <Button type="primary" loading={saving} disabled={!dirty} onClick={() => save()} style={{ background: "#0d9488", border: "none" }}>
+          <Button type="primary" loading={saving} disabled={!dirty} onClick={() => save()}>
             保存别名
           </Button>
         }
@@ -115,7 +115,7 @@ export default function Models() {
               ),
             },
             {
-              title: "别名（给 Cursor 用）",
+              title: "别名",
               width: 280,
               render: (_: unknown, row: ShopModel) => (
                 <Input

@@ -543,14 +543,33 @@ body {
 
 .ant-btn-primary {
   font-weight: 600;
+  color: #ffffff !important;
   background: linear-gradient(135deg, #159e91, #0a746c);
   border: none;
   box-shadow: 0 6px 16px rgba(15, 143, 131, 0.2);
 }
 
-.ant-btn-primary:hover {
+.ant-btn-primary:hover:not(:disabled):not(.ant-btn-disabled) {
+  color: #ffffff !important;
   background: linear-gradient(135deg, #18aa9c, #0b8178) !important;
   box-shadow: 0 8px 20px rgba(15, 143, 131, 0.28) !important;
+}
+
+.ant-btn-primary:disabled,
+.ant-btn-primary.ant-btn-disabled,
+.ant-btn-primary[disabled] {
+  color: #4b5f5b !important;
+  background: #d7e4e1 !important;
+  box-shadow: none !important;
+  text-shadow: none;
+  opacity: 1;
+}
+
+.dark .ant-btn-primary:disabled,
+.dark .ant-btn-primary.ant-btn-disabled,
+.dark .ant-btn-primary[disabled] {
+  color: #d5e4e0 !important;
+  background: #2c403c !important;
 }
 
 .ant-table-wrapper .ant-table-thead > tr > th {
