@@ -483,6 +483,27 @@ def recharge_user(request: Request, user_id: str, body: dict[str, Any]) -> dict[
     return rec.public_dict()
 
 
+@router.put("/users/{user_id}/balance")
+def set_user_balance(request: Request, user_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    if "yuan" not in body:
+        raise HTTPException(400, "请填写余额")
+    try:
+        yuan = float(body.get("yuan"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "余额必须是数字") from exc
+    if yuan < 0 or yuan != yuan:
+        raise HTTPException(400, "余额不能为负数")
+    try:
+        rec = _store(request).set_balance(
+            user_id,
+            yuan_to_micros(yuan),
+            note=str(body.get("note") or "后台调账"),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return rec.public_dict()
+
+
 @router.get("/cards")
 def list_cards(request: Request) -> dict[str, Any]:
     return {"cards": [c.public_dict(reveal=True) for c in _store(request).list_cards()]}

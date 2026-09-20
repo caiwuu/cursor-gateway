@@ -8,6 +8,7 @@ export function maskToken(value: string) {
 
 export function ledgerKind(kind: string) {
   if (kind === "recharge") return "充值";
+  if (kind === "adjust") return "调账";
   if (kind === "redeem") return "兑换";
   if (kind === "usage") return "消费";
   return kind || "其他";

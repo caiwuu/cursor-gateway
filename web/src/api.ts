@@ -101,6 +101,8 @@ export const api = {
   deleteUser: (id: string) => req<{ ok: boolean }>(`/api/users/${id}`, { method: "DELETE" }),
   rechargeUser: (id: string, yuan: number, note = "") =>
     req<GatewayUser>(`/api/users/${id}/recharge`, { method: "POST", body: JSON.stringify({ yuan, note }) }),
+  setUserBalance: (id: string, yuan: number, note = "") =>
+    req<GatewayUser>(`/api/users/${id}/balance`, { method: "PUT", body: JSON.stringify({ yuan, note }) }),
   cards: () => req<{ cards: RedeemCard[] }>("/api/cards"),
   createCards: (count: number, yuan: number, note = "") =>
     req<{ cards: RedeemCard[] }>("/api/cards", { method: "POST", body: JSON.stringify({ count, yuan, note }) }),

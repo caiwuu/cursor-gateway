@@ -38,6 +38,7 @@ import {
   StopOutlined,
   UserOutlined,
   DollarOutlined,
+  KeyOutlined,
   SafetyCertificateOutlined,
   SaveOutlined,
 } from "@ant-design/icons";
@@ -106,12 +107,14 @@ export default function Users() {
   // Modals
   const [creating, setCreating] = useState(false);
   const [recharging, setRecharging] = useState<GatewayUser | null>(null);
+  const [resetting, setResetting] = useState<GatewayUser | null>(null);
   const [issuing, setIssuing] = useState(false);
   const [issued, setIssued] = useState<RedeemCard[]>([]);
   
   // Forms
   const [userForm] = Form.useForm<{ username: string; password: string; yuan: number; role: "admin" | "user" }>();
   const [rechargeForm] = Form.useForm<{ yuan: number; note: string }>();
+  const [passwordForm] = Form.useForm<{ password: string; confirm: string }>();
   const [cardForm] = Form.useForm<{ count: number; yuan: number; note: string }>();
   const [billingForm] = Form.useForm();
 
@@ -382,7 +385,7 @@ export default function Users() {
                     loading={loading}
                     dataSource={filteredUsers}
                     pagination={filteredUsers.length > 15 ? { pageSize: 15, showSizeChanger: false } : false}
-                    scroll={{ x: 960 }}
+                    scroll={{ x: 1080 }}
                     locale={{
                       emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未找到匹配的用户" />,
                     }}
@@ -462,19 +465,33 @@ export default function Users() {
                       },
                       {
                         title: "操作",
-                        width: 150,
+                        width: 220,
                         align: "center",
                         render: (_: unknown, row: GatewayUser) => (
                           <Flex justify="center" gap={0}>
                             <Button
                               type="link"
                               size="small"
+                              icon={<KeyOutlined />}
                               onClick={() => {
-                                setRecharging(row);
-                                rechargeForm.resetFields();
+                                setResetting(row);
+                                passwordForm.resetFields();
                               }}
                             >
-                              充值
+                              改密码
+                            </Button>
+                            <Button
+                              type="link"
+                              size="small"
+                              onClick={() => {
+                                setRecharging(row);
+                                rechargeForm.setFieldsValue({
+                                  yuan: Number(row.balance_yuan || 0),
+                                  note: "",
+                                });
+                              }}
+                            >
+                              改余额
                             </Button>
                             <Popconfirm
                               title={`确定删除用户 ${row.username}？`}
@@ -982,39 +999,98 @@ export default function Users() {
         </Form>
       </Modal>
 
-      {/* Modal: 用户手动充值 */}
+      {/* Modal: 修改登录密码 */}
       <Modal
-        title={recharging ? `给账户 ${recharging.username} 后台充值` : "账户后台充值"}
-        open={!!recharging}
-        onCancel={() => setRecharging(null)}
-        onOk={() => rechargeForm.submit()}
-        okText="确认充值"
+        title={resetting ? `修改 ${resetting.username} 的登录密码` : "修改登录密码"}
+        open={!!resetting}
+        onCancel={() => setResetting(null)}
+        onOk={() => passwordForm.submit()}
+        okText="保存密码"
         cancelText="取消"
         destroyOnClose
       >
         <div style={{ height: 10 }} />
         <Form
+          form={passwordForm}
+          layout="vertical"
+          requiredMark={false}
+          onFinish={async (values) => {
+            if (!resetting) return;
+            try {
+              await api.updateUser(resetting.id, { password: values.password });
+              setResetting(null);
+              message.success(`已更新 ${resetting.username} 的密码`);
+            } catch (e) {
+              message.error(String((e as Error).message || e));
+            }
+          }}
+        >
+          <Form.Item
+            name="password"
+            label="新密码"
+            rules={[
+              { required: true, message: "请填写新密码" },
+              { min: 6, message: "至少 6 位" },
+            ]}
+          >
+            <Input.Password autoComplete="new-password" placeholder="至少 6 位" autoFocus />
+          </Form.Item>
+          <Form.Item
+            name="confirm"
+            label="确认新密码"
+            dependencies={["password"]}
+            rules={[
+              { required: true, message: "请再输入一次" },
+              ({ getFieldValue }) => ({
+                validator(_, value) {
+                  if (!value || getFieldValue("password") === value) return Promise.resolve();
+                  return Promise.reject(new Error("两次输入的密码不一致"));
+                },
+              }),
+            ]}
+          >
+            <Input.Password autoComplete="new-password" placeholder="再输入一次" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* Modal: 修改用户余额 */}
+      <Modal
+        title={recharging ? `修改 ${recharging.username} 的余额` : "修改余额"}
+        open={!!recharging}
+        onCancel={() => setRecharging(null)}
+        onOk={() => rechargeForm.submit()}
+        okText="保存余额"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <div style={{ height: 10 }} />
+        {recharging ? (
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+            当前余额 {formatYuan(recharging.balance)}。填写目标余额即可上调或下调，差额会记入账本。
+          </Typography.Paragraph>
+        ) : null}
+        <Form
           form={rechargeForm}
           layout="vertical"
-          initialValues={{ yuan: 10 }}
           requiredMark={false}
           onFinish={async (values) => {
             if (!recharging) return;
             try {
-              await api.rechargeUser(recharging.id, values.yuan, values.note);
+              await api.setUserBalance(recharging.id, values.yuan, values.note);
               setRecharging(null);
-              message.success(`成功给 ${recharging.username} 充值 ${formatYuan(values.yuan)}`);
+              message.success(`已将 ${recharging.username} 的余额设为 ¥${Number(values.yuan).toFixed(4)}`);
               await load();
             } catch (e) {
               message.error(String((e as Error).message || e));
             }
           }}
         >
-          <Form.Item name="yuan" label="充值额度" rules={[{ required: true, message: "请输入充值额度" }]}>
-            <InputNumber min={0.01} step={5} style={{ width: "100%" }} addonAfter="元" autoFocus />
+          <Form.Item name="yuan" label="目标余额" rules={[{ required: true, message: "请填写余额" }]}>
+            <InputNumber min={0} step={1} style={{ width: "100%" }} addonAfter="元" autoFocus />
           </Form.Item>
-          <Form.Item name="note" label="充值备注 (买家订单号/淘宝/活动赠送)">
-            <Input placeholder="输入本次人工充值的标记说明" />
+          <Form.Item name="note" label="备注">
+            <Input placeholder="例如：纠错 / 补偿 / 人工扣减" />
           </Form.Item>
         </Form>
       </Modal>

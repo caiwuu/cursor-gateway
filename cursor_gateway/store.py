@@ -1389,6 +1389,18 @@ class Store:
             raise ValueError("用户不存在")
         return rec
 
+    def set_balance(self, user_id: str, micros: int, *, note: str = "") -> UserRecord:
+        current = self.get_user(user_id)
+        if current is None:
+            raise ValueError("用户不存在")
+        target = max(0, int(micros))
+        delta = target - int(current.balance or 0)
+        if delta == 0:
+            return current
+        return self.adjust_balance(
+            user_id, delta, kind="adjust", note=note or "后台调账"
+        )
+
     def charge_user(self, user_id: str, micros: int, *, note: str = "") -> Optional[UserRecord]:
         cost = int(micros or 0)
         if cost <= 0 or not user_id:
