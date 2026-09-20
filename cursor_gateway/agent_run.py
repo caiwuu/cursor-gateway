@@ -9,6 +9,7 @@ tool 消息发回来时，按 ConversationHistory 的 assistant.tool_call / tool
 
 from __future__ import annotations
 
+import base64
 import json
 import queue
 import socket
@@ -51,6 +52,10 @@ CONTINUE_TEXT = (
     "请直接基于这些结果继续完成任务并回答；不要用相同参数重复调用同一工具。"
 )
 HISTORY_PREFACE = "以下是本次对话此前的记录（含工具调用与结果），请直接延续："
+IMAGE_NOTE = "对话中的图片已按 [image N] 编号随本消息附上，编号即附图顺序。"
+# 附图上限：超出时丢最早的，文本里标 [image 已省略]
+MAX_IMAGES = 10
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
 # 收到第一个 mcp exec 后再等一小段，把同一步的并行工具调用收齐再断流
 TOOL_GRACE_S = 0.6
 
@@ -137,7 +142,61 @@ def _msg_text(msg: Any) -> str:
     return "".join(p.text for p in msg.parts if p.kind == "text" and p.text)
 
 
-def _fold_history(dialog: list[Any], call_names: dict[str, str]) -> str:
+def _image_bytes(part: Any) -> tuple[bytes, str]:
+    """image Part（data 为 base64）→ (原始字节, mime)。解不出来返回空字节。"""
+    raw = (getattr(part, "data", "") or "").strip()
+    if not raw:
+        return b"", ""
+    try:
+        data = base64.b64decode(raw + "=" * (-len(raw) % 4), validate=False)
+    except Exception:  # noqa: BLE001
+        return b"", ""
+    return data, (getattr(part, "mime", "") or "image/png")
+
+
+def _select_images(
+    dialog: list[Any], current: Optional[Any]
+) -> tuple[list[tuple[bytes, str]], dict[int, int], set[int]]:
+    """按时间顺序编号可附带的图片。
+
+    返回 (附图列表, id(part)→编号, 被省略的 id(part))。超出 MAX_IMAGES /
+    MAX_IMAGE_BYTES 时优先保留最近的（当前消息里的最优先）。
+    """
+    ordered: list[tuple[Any, bytes, str]] = []
+    for m in [*dialog, *([current] if current is not None else [])]:
+        if m.role != "user":
+            continue
+        for p in m.parts:
+            if p.kind != "image":
+                continue
+            data, mime = _image_bytes(p)
+            ordered.append((p, data, mime))
+    keep: list[tuple[Any, bytes, str]] = []
+    total = 0
+    for p, data, mime in reversed(ordered):
+        if not data or len(keep) >= MAX_IMAGES or total + len(data) > MAX_IMAGE_BYTES:
+            continue
+        keep.append((p, data, mime))
+        total += len(data)
+    keep.reverse()
+    index = {id(p): n for n, (p, _, _) in enumerate(keep, start=1)}
+    dropped = {id(p) for p, _, _ in ordered if id(p) not in index}
+    return [(data, mime) for _, data, mime in keep], index, dropped
+
+
+def _user_text_with_images(msg: Any, index: dict[int, int]) -> str:
+    """用户消息文本；图片位置放 [image N] 占位。"""
+    parts: list[str] = []
+    for p in msg.parts:
+        if p.kind == "text" and p.text:
+            parts.append(p.text)
+        elif p.kind == "image":
+            n = index.get(id(p))
+            parts.append(f"[image {n}]" if n else "[image 已省略]")
+    return "\n".join(parts)
+
+
+def _fold_history(dialog: list[Any], call_names: dict[str, str], image_index: dict[int, int]) -> str:
     """把此前对话（含工具调用/结果）折成文本。
 
     实测 AgentService/Run 不把 UserMessageAction.conversation_history 喂给模型
@@ -146,7 +205,7 @@ def _fold_history(dialog: list[Any], call_names: dict[str, str]) -> str:
     lines = ["<conversation_history>"]
     for m in dialog:
         if m.role == "user":
-            t = _msg_text(m)
+            t = _user_text_with_images(m, image_index)
             if t.strip():
                 lines += ["[user]", t]
         elif m.role == "assistant":
@@ -166,12 +225,16 @@ def _fold_history(dialog: list[Any], call_names: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def _history_from_msgs(msgs: list[Any]) -> tuple[str, bytes]:
-    """内部 Msg 列表 → (本轮 user 文本, ConversationHistory 字节)。
+def _has_user_content(msg: Any) -> bool:
+    return any((p.kind == "text" and p.text.strip()) or p.kind == "image" for p in msg.parts)
+
+
+def _history_from_msgs(msgs: list[Any]) -> tuple[str, bytes, list[tuple[bytes, str]]]:
+    """内部 Msg 列表 → (本轮 user 文本, ConversationHistory 字节, 附图列表)。
 
     system 并进本轮 user 文本（服务端会把 custom_system_prompt 当 CLI 参数）。
-    此前对话折成文本放在 user 文本前面；最后一条不是 user 文本时（以 tool 结果收尾），
-    用 CONTINUE_TEXT 顶上。
+    此前对话折成文本放在 user 文本前面；最后一条不是 user 消息时（以 tool 结果收尾），
+    用 CONTINUE_TEXT 顶上。图片（当前的和历史里的）都作为本轮附图带上，文本里留编号。
     """
     systems: list[str] = []
     dialog: list[Any] = []
@@ -186,14 +249,20 @@ def _history_from_msgs(msgs: list[Any]) -> tuple[str, bytes]:
         p.id: p.name for m in dialog for p in m.parts if p.kind == "tool_call" and p.id
     }
 
-    current_user = ""
-    if dialog and dialog[-1].role == "user" and _msg_text(dialog[-1]).strip():
-        last = dialog[-1]
-        current_user = _msg_text(last)
+    current: Optional[Any] = None
+    if dialog and dialog[-1].role == "user" and _has_user_content(dialog[-1]):
+        current = dialog[-1]
         dialog = dialog[:-1]
-        tail = [p for p in last.parts if p.kind == "tool_result"]
+        tail = [p for p in current.parts if p.kind == "tool_result"]
         if tail:
             dialog.append(SimpleNamespace(role="tool", parts=tail))
+
+    images, image_index, _dropped = _select_images(dialog, current)
+
+    if current is not None:
+        current_user = _user_text_with_images(current, image_index)
+        if not _msg_text(current).strip():
+            current_user = current_user + "\n请看附图。"
     elif dialog:
         current_user = CONTINUE_TEXT
     else:
@@ -230,10 +299,14 @@ def _history_from_msgs(msgs: list[Any]) -> tuple[str, bytes]:
             hist += P.pb_bytes(1, P.pb_bytes(3, body))
 
     if dialog:
-        current_user = HISTORY_PREFACE + "\n" + _fold_history(dialog, call_names) + "\n\n" + current_user
+        current_user = (
+            HISTORY_PREFACE + "\n" + _fold_history(dialog, call_names, image_index) + "\n\n" + current_user
+        )
+    if images:
+        current_user = IMAGE_NOTE + "\n\n" + current_user
     if systems:
         current_user = "\n\n".join(systems) + "\n\n" + current_user
-    return current_user, hist
+    return current_user, hist, images
 
 
 def _export_call_id(raw: str) -> str:
@@ -290,8 +363,22 @@ def _mcp_exec_event(args: dict, index: int) -> dict[str, Any]:
     }
 
 
-def _user_message(text: str) -> bytes:
-    return P.pb_str(1, text) + P.pb_str(2, str(uuid.uuid4())) + P.pb_enum(4, AGENT_MODE)
+def _selected_context(images: list[tuple[bytes, str]]) -> bytes:
+    """SelectedContext.selected_images(1)：SelectedImage{uuid(2) mime_type(7) data(8)}。
+    服务端拿 data 自己算 blob id / 识别 MIME，不需要尺寸。"""
+    body = b""
+    for data, mime in images:
+        img = P.pb_str(2, str(uuid.uuid4())) + P.pb_str(7, mime or "image/png") + P.pb_bytes(8, data)
+        body += P.pb_bytes(1, img)
+    return body
+
+
+def _user_message(text: str, images: Optional[list[tuple[bytes, str]]] = None) -> bytes:
+    body = P.pb_str(1, text) + P.pb_str(2, str(uuid.uuid4()))
+    if images:
+        body += P.pb_bytes(3, _selected_context(images))
+    body += P.pb_enum(4, AGENT_MODE)
+    return body
 
 
 def _hist_text(text: str) -> bytes:
@@ -358,14 +445,15 @@ def build_run_request(
     msgs: Optional[list[Any]] = None,
     tools: Optional[list[dict]] = None,
 ) -> bytes:
+    images: list[tuple[bytes, str]] = []
     if msgs:
-        user_text, hist = _history_from_msgs(msgs)
+        user_text, hist, images = _history_from_msgs(msgs)
     else:
         user_text, prior = _split_turn(messages_pb)
         hist = _conversation_history(prior) if prior else b""
     tool_defs = _mcp_tool_defs(tools)
     _tls.tool_defs = tool_defs
-    uma = P.pb_bytes(1, _user_message(user_text))
+    uma = P.pb_bytes(1, _user_message(user_text, images))
     uma += P.pb_bytes(2, _request_context())
     if hist:
         uma += P.pb_bytes(7, hist)
