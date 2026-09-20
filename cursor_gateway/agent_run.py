@@ -56,9 +56,9 @@ CONTINUE_TAIL = "请直接执行下一步（调用下一个工具，或给出最
 HISTORY_PREFACE = "以下是本次对话此前的记录（含工具调用与结果），请直接延续："
 # 调用方声明了工具时，先把环境说清楚：Agent 侧没有内置终端，别去试内置 shell
 TOOLS_NOTE = (
-    "环境说明：本环境没有内置终端和文件系统，Agent 自带的 shell、read、grep、glob、ls 等内置工具"
-    "在这里都会失败，请不要调用。调用方提供了这些工具：{names}。它们在用户本机执行，"
-    "效果等同于本地终端和文件系统，所有命令、读写和搜索都请直接通过它们完成。"
+    "环境说明：本环境没有内置终端和文件系统，请不要调用 Agent 自带的 shell、read、grep、glob、ls 等内置工具。"
+    "调用方提供了这些工具：{names}。它们在用户本机执行，效果等同于本地终端和文件系统，"
+    "所有命令、读写和搜索都请直接通过它们完成。"
 )
 CLIP_HEAD = 360
 CLIP_TAIL = 240
@@ -286,12 +286,15 @@ def _continue_text(dialog: list[Any], call_names: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def _history_from_msgs(msgs: list[Any]) -> tuple[str, bytes, list[tuple[bytes, str]]]:
+def _history_from_msgs(
+    msgs: list[Any], tool_names: Optional[list[str]] = None
+) -> tuple[str, bytes, list[tuple[bytes, str]]]:
     """内部 Msg 列表 → (本轮 user 文本, ConversationHistory 字节, 附图列表)。
 
     system 并进本轮 user 文本（服务端会把 custom_system_prompt 当 CLI 参数）。
     此前对话折成文本放在 user 文本前面；最后一条不是 user 消息时（以 tool 结果收尾），
     用 CONTINUE_TEXT 顶上。图片（当前的和历史里的）都作为本轮附图带上，文本里留编号。
+    工具说明和附图说明都紧贴在本轮问题前面：模型对结尾更敏感。
     """
     systems: list[str] = []
     dialog: list[Any] = []
@@ -356,9 +359,14 @@ def _history_from_msgs(msgs: list[Any]) -> tuple[str, bytes, list[tuple[bytes, s
                 body += P.pb_bool(4, True)
             hist += P.pb_bytes(1, P.pb_bytes(3, body))
 
+    notes: list[str] = []
+    if tool_names:
+        notes.append(TOOLS_NOTE.format(names="、".join(tool_names)))
     if images:
-        # 放在问题紧前面：模型对结尾更敏感，不然容易忽略附图去找"文件"
-        current_user = IMAGE_NOTE + "\n\n" + current_user
+        # 不然容易忽略附图去找"文件"
+        notes.append(IMAGE_NOTE)
+    if notes:
+        current_user = "\n\n".join([*notes, current_user])
     if dialog:
         current_user = (
             HISTORY_PREFACE + "\n" + _fold_history(dialog, call_names, image_index) + "\n\n" + current_user
@@ -407,19 +415,148 @@ def _struct_py(parsed: dict, entry_field: int = 1) -> dict[str, Any]:
     return out
 
 
-def _mcp_exec_event(args: dict, index: int) -> dict[str, Any]:
-    """ExecServerMessage.mcp_args → 对外 tool_call 事件（单帧 complete）。"""
-    name = P.as_text(P.first(args, 5)) or P.as_text(P.first(args, 1))
-    call_id = _export_call_id(P.as_text(P.first(args, 3))) or ("call_" + uuid.uuid4().hex[:24])
-    payload = _struct_py(args, entry_field=2)
+def _tool_call_event(name: str, args: dict[str, Any], call_id: str, index: int) -> dict[str, Any]:
     return {
         "type": "tool_call",
-        "id": call_id,
+        "id": _export_call_id(call_id) or ("call_" + uuid.uuid4().hex[:24]),
         "name": name,
-        "args": json.dumps(payload, ensure_ascii=False),
+        "args": json.dumps(args, ensure_ascii=False),
         "complete": True,
         "index": index,
     }
+
+
+def _mcp_exec_event(args: dict, index: int) -> dict[str, Any]:
+    """ExecServerMessage.mcp_args → 对外 tool_call 事件（单帧 complete）。"""
+    name = P.as_text(P.first(args, 5)) or P.as_text(P.first(args, 1))
+    return _tool_call_event(name, _struct_py(args, entry_field=2), P.as_text(P.first(args, 3)), index)
+
+
+# ---------------------------------------------------------------------------
+# Agent 内置工具 → 调用方同类工具
+#
+# 服务端系统提示会催模型用自带的 shell/read/grep；这里没有沙箱，能识别的直接翻译成
+# 调用方声明的同类工具调用，让它在用户本机执行；识别不了的再回绝并指回调用方工具。
+# ExecServerMessage 字段号（实测）：
+#   14 shell : command(1) timeout_ms(3) call_id(4) binary(5) description(15)
+#    7 read  : path(1) call_id(2)
+#    5 grep  : pattern(1) path(2) glob(3) output_mode(4) call_id(14)（无 pattern 时即 glob 列文件）
+# ---------------------------------------------------------------------------
+
+EXEC_SHELL, EXEC_READ, EXEC_GREP = 14, 7, 5
+
+_TOOL_FAMILIES: dict[str, tuple[str, ...]] = {
+    "shell": ("shell", "bash", "run_terminal_cmd", "terminal", "execute_command", "run_command",
+              "exec", "execute", "run_shell_command", "run_in_terminal", "powershell"),
+    "read": ("read", "read_file", "readfile", "view_file", "view", "cat", "open_file"),
+    "grep": ("grep", "grep_search", "ripgrep", "rg", "search_files", "search_file_content",
+             "code_search", "regex_search"),
+    "glob": ("glob", "glob_file_search", "find_files", "file_search", "list_files", "find_by_name"),
+}
+_ARG_KEYS: dict[str, tuple[str, ...]] = {
+    "shell.command": ("command", "cmd", "script", "commandLine"),
+    "shell.description": ("description", "explanation", "summary"),
+    "read.path": ("path", "file_path", "target_file", "filePath", "filename", "file"),
+    "grep.pattern": ("pattern", "query", "regex", "search_pattern"),
+    "grep.path": ("path", "directory", "target_directory", "dir", "search_path"),
+    "grep.glob": ("glob", "include", "include_pattern", "file_pattern"),
+    "grep.output_mode": ("output_mode",),
+    "glob.pattern": ("glob_pattern", "pattern", "glob", "query", "file_pattern"),
+    "glob.path": ("target_directory", "path", "directory", "dir", "search_path"),
+}
+
+
+def _find_tool(tools: Optional[list[dict]], family: str) -> Optional[dict]:
+    wanted = _TOOL_FAMILIES[family]
+    for t in tools or []:
+        if str(t.get("name") or "").strip().lower() in wanted:
+            return t
+    return None
+
+
+def _schema_props(tool: dict) -> set[str]:
+    schema = tool.get("parameters") or {}
+    if isinstance(schema, dict) and set(schema) == {"jsonSchema"}:
+        schema = schema["jsonSchema"]
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    return set(props) if isinstance(props, dict) else set()
+
+
+def _pick_key(props: set[str], candidates: tuple[str, ...], *, required: bool = False) -> Optional[str]:
+    for c in candidates:
+        if c in props:
+            return c
+    # 没声明 properties 的松散 schema：主参数按惯用名兜底
+    return candidates[0] if required and not props else None
+
+
+def _text_field(parsed: dict, no: int) -> str:
+    val = P.first(parsed, no)
+    return P.as_text(bytes(val)) if isinstance(val, (bytes, bytearray)) else ""
+
+
+def _map_builtin_exec(
+    em: dict, kinds: list[int], tools: Optional[list[dict]]
+) -> Optional[tuple[str, dict[str, Any], str]]:
+    """内置 shell/read/grep/glob 调用 → (调用方工具名, 参数, call_id)；对不上返回 None。"""
+    if EXEC_SHELL in kinds:
+        inner = P.pb_parse(P.first(em, EXEC_SHELL))
+        command = _text_field(inner, 1)
+        tool = _find_tool(tools, "shell")
+        if not command or tool is None:
+            return None
+        props = _schema_props(tool)
+        key = _pick_key(props, _ARG_KEYS["shell.command"], required=True)
+        if not key:
+            return None
+        args: dict[str, Any] = {key: command}
+        desc = _text_field(inner, 15)
+        dkey = _pick_key(props, _ARG_KEYS["shell.description"]) if desc else None
+        if dkey:
+            args[dkey] = desc
+        return str(tool["name"]), args, _text_field(inner, 4)
+    if EXEC_READ in kinds:
+        inner = P.pb_parse(P.first(em, EXEC_READ))
+        path = _text_field(inner, 1)
+        tool = _find_tool(tools, "read")
+        if not path or tool is None:
+            return None
+        key = _pick_key(_schema_props(tool), _ARG_KEYS["read.path"], required=True)
+        if not key:
+            return None
+        return str(tool["name"]), {key: path}, _text_field(inner, 2)
+    if EXEC_GREP in kinds:
+        inner = P.pb_parse(P.first(em, EXEC_GREP))
+        pattern, path, glob, mode = (_text_field(inner, n) for n in (1, 2, 3, 4))
+        call_id = _text_field(inner, 14)
+        if pattern:
+            tool = _find_tool(tools, "grep")
+            if tool is None:
+                return None
+            props = _schema_props(tool)
+            pk = _pick_key(props, _ARG_KEYS["grep.pattern"], required=True)
+            if not pk:
+                return None
+            args = {pk: pattern}
+            for fam, val in (("grep.path", path), ("grep.glob", glob), ("grep.output_mode", mode)):
+                k = _pick_key(props, _ARG_KEYS[fam]) if val else None
+                if k:
+                    args[k] = val
+            return str(tool["name"]), args, call_id
+        if glob:
+            tool = _find_tool(tools, "glob")
+            if tool is None:
+                return None
+            props = _schema_props(tool)
+            pk = _pick_key(props, _ARG_KEYS["glob.pattern"], required=True)
+            if not pk:
+                return None
+            args = {pk: glob}
+            k = _pick_key(props, _ARG_KEYS["glob.path"]) if path else None
+            if k:
+                args[k] = path
+            return str(tool["name"]), args, call_id
+    return None
 
 
 def _selected_context(images: list[tuple[bytes, str]]) -> bytes:
@@ -505,16 +642,16 @@ def build_run_request(
     tools: Optional[list[dict]] = None,
 ) -> bytes:
     images: list[tuple[bytes, str]] = []
+    names = _tool_names(tools)
     if msgs:
-        user_text, hist, images = _history_from_msgs(msgs)
+        user_text, hist, images = _history_from_msgs(msgs, names)
     else:
         user_text, prior = _split_turn(messages_pb)
         hist = _conversation_history(prior) if prior else b""
+        if names:
+            user_text = TOOLS_NOTE.format(names="、".join(names)) + "\n\n" + user_text
     tool_defs = _mcp_tool_defs(tools)
     _tls.tool_defs = tool_defs
-    names = _tool_names(tools)
-    if names:
-        user_text = TOOLS_NOTE.format(names="、".join(names)) + "\n\n" + user_text
     try:
         import sand_server as SS  # noqa: PLC0415
 
@@ -681,18 +818,23 @@ def _unsupported_exec_message(kinds: list[int], names: list[str]) -> str:
 
 def _exec_summary(em: dict, kinds: list[int]) -> str:
     """把内置工具调用的结构压成一行日志，便于之后识别字段号。"""
+    def show(val: Any) -> str:
+        if isinstance(val, (bytes, bytearray)):
+            text = bytes(val).decode("utf-8", "replace")
+            if text and sum(ch.isprintable() for ch in text) >= len(text) * 0.9:
+                return repr(text[:60])
+            return f"bytes[{len(val)}]"
+        return repr(val)
+
     parts: list[str] = []
     for k in kinds[:3]:
         try:
             inner = P.pb_parse(P.first(em, k))
-            fields = []
-            for fk in sorted(inner)[:8]:
-                val = P.as_text(P.first(inner, fk))
-                fields.append(f"{fk}={val[:60]!r}" if val else str(fk))
+            fields = [f"{fk}={show(P.first(inner, fk))}" for fk in sorted(inner)[:10]]
             parts.append(f"{k}:{{{', '.join(fields)}}}")
-        except Exception:  # noqa: BLE001
-            parts.append(f"{k}:?")
-    return " ".join(parts)[:400]
+        except Exception as exc:  # noqa: BLE001
+            parts.append(f"{k}:?{type(exc).__name__}")
+    return " ".join(parts)[:500]
 
 
 def _kv_reply(kid: int, get_blob: bool) -> bytes:
@@ -785,16 +927,27 @@ def iter_agent_events(
                 else:
                     kinds = [k for k in em if k not in (1, 15, 19, 55, 57)]
                     names = _tool_names(tools)
+                    mapped = _map_builtin_exec(em, kinds, tools)
                     try:
                         import sand_server as SS  # noqa: PLC0415
 
-                        SS._log(
-                            f"agent builtin exec rejected kinds={kinds} "
-                            f"client_tools={len(names)} {_exec_summary(em, kinds)}"
-                        )
+                        if mapped is not None:
+                            SS._log(f"agent builtin exec kinds={kinds} -> caller tool {mapped[0]}")
+                        else:
+                            SS._log(
+                                f"agent builtin exec rejected kinds={kinds} "
+                                f"client_tools={len(names)} {_exec_summary(em, kinds)}"
+                            )
                     except Exception:  # noqa: BLE001
                         pass
-                    client.send_msg(_exec_throw(eid, _unsupported_exec_message(kinds, names)))
+                    if mapped is not None:
+                        # 翻译成调用方同类工具的调用，和 mcp 调用一样回给调用方并结束本轮
+                        name, args, call_id = mapped
+                        yield _tool_call_event(name, args, call_id, tool_calls)
+                        tool_calls += 1
+                        client.soft_deadline = time.time() + TOOL_GRACE_S
+                    else:
+                        client.send_msg(_exec_throw(eid, _unsupported_exec_message(kinds, names)))
             if 4 in top:
                 kv = P.pb_parse(P.first(top, 4))
                 kid = _first_int(kv, 1)
