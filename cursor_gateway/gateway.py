@@ -319,6 +319,8 @@ async def _stream_upstream(
                         continue
                     raise
             if is_account:
+                # API key 换出的 token 直连 api2 Stream 会 401（ide / sand 身份都一样），
+                # 只有 AgentService/Run 认它。调用方 tools 以 MCP 工具桥接过去。
                 mid, mac = rt.identity()
                 try:
                     async for ev in AR.stream_account_events(
@@ -331,6 +333,8 @@ async def _stream_upstream(
                         agent_host=rt.record.agent_host,
                         client_version=rt.record.account_client_version,
                         workspace=rt.record.account_workspace,
+                        msgs=getattr(prep, "msgs", None),
+                        tools=getattr(prep, "tools", None),
                     ):
                         if first_at is None:
                             first_at = time.perf_counter()
@@ -496,9 +500,8 @@ SS._stream_events = _tenant_stream_events
 
 
 def _think_hint_wanted() -> bool:
-    """只有 Box relay 会脱敏原生思考，才需要让模型在正文里用 <think> 标出。
-    Agent / 直连自带思考通道，注入会让模型写两遍，第二遍漏进正文。"""
-    return _CTX_MODE.get() == MODE_BOT
+    """不再注入 <think> 提示。Box relay 脱敏后也不用正文伪造思考链。"""
+    return False
 
 
 SS._think_hint_wanted = _think_hint_wanted
@@ -1292,7 +1295,7 @@ def node_info(rt: NodeRuntime) -> dict[str, Any]:
         },
         "modes": {
             "bot": "节点 api_key → EnsureSandBox → Box relay",
-            "account": "调用方 key 或节点凭据 → AgentService/Run",
+            "account": "调用方 key 或节点凭据 → AgentService/Run（调用方 tools 以 MCP 工具桥接）",
             "sand-direct": "节点账号以 sand 身份直连 api2 Stream",
         },
     }

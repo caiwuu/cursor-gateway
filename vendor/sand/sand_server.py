@@ -1363,13 +1363,8 @@ _THINK_HINT = (
 
 
 def _think_hint_wanted() -> bool:
-    """是否让模型在正文里用 <think> 标出思考。
-
-    只有 Box relay 会把原生思考脱敏，才需要这个兜底；Agent / 直连链路自带思考通道，
-    再注入会让模型把思考写两遍，第二遍以 <think> 明文漏进正文。
-    cursor-gateway 按每个请求的模式覆盖此函数。
-    """
-    return True
+    """是否让模型在正文里用 <think> 标出思考。默认关闭，不为思考链额外催模型。"""
+    return False
 
 
 class StreamThinkSplit:
@@ -1517,6 +1512,9 @@ class Prepared:
     stops: list[str]
     show_thinking: bool = True
     user_text: str = ""  # grokbot 后端只吃最后一条 user 文本
+    # 原始 Msg / 工具定义：account（AgentService/Run）链路按 MCP 工具重新编码
+    msgs: list = field(default_factory=list)
+    tools: list = field(default_factory=list)
 
 
 @dataclass
@@ -1740,6 +1738,8 @@ async def _prepare_openai(payload: dict) -> Prepared:
         isolated=isolated,
         stops=_stops_of(payload.get("stop")),
         user_text=_last_user_text(msgs),
+        msgs=msgs,
+        tools=tools,
     )
 
 
@@ -2100,6 +2100,8 @@ async def _prepare_anthropic(payload: dict) -> Prepared:
         stops=_stops_of(payload.get("stop_sequences")),
         show_thinking=True,
         user_text=_last_user_text(msgs),
+        msgs=msgs,
+        tools=tools,
     )
 
 

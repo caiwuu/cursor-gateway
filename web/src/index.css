@@ -809,15 +809,33 @@ body {
   color: #adbfba;
 }
 
-.login-card .ant-input-affix-wrapper,
-.login-card .ant-input {
+.login-card.ant-card .ant-input-affix-wrapper,
+.login-card.ant-card input.ant-input {
+  height: 46px;
   min-height: 46px;
+  box-sizing: border-box;
   background: rgba(255, 255, 255, 0.72);
 }
 
-.dark .login-card .ant-input-affix-wrapper,
-.dark .login-card .ant-input {
+.login-card.ant-card .ant-input-affix-wrapper {
+  display: flex;
+  align-items: center;
+}
+
+.login-card.ant-card .ant-input-affix-wrapper input.ant-input {
+  height: auto;
+  min-height: 0;
+  padding-block: 0;
+  background: transparent;
+}
+
+.dark .login-card.ant-card .ant-input-affix-wrapper,
+.dark .login-card.ant-card input.ant-input {
   background: rgba(255, 255, 255, 0.035);
+}
+
+.dark .login-card.ant-card .ant-input-affix-wrapper input.ant-input {
+  background: transparent;
 }
 
 .login-submit.ant-btn {

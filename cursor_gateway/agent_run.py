@@ -1,13 +1,23 @@
-"""account 模式：官方 3.19 AgentService/Run（HTTP/2 双向流）。"""
+"""account 模式：官方 3.19 AgentService/Run（HTTP/2 双向流）。
+
+调用方的 function tools 以 MCP 工具声明给 Agent（AgentRunRequest.mcp_tools +
+RequestContext.tools）。服务端要调工具时下发 ExecServerMessage.mcp_args，这里
+不在 Box 内执行，而是转成 tool_call 事件回给调用方并结束本轮；调用方把结果作为
+tool 消息发回来时，按 ConversationHistory 的 assistant.tool_call / tool 消息回填，
+再开一轮 run 让模型继续。整个过程无状态，网关重启不影响。
+"""
 
 from __future__ import annotations
 
+import json
 import queue
 import socket
 import ssl
+import struct
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Iterator, Optional
 
 import h2.connection
@@ -26,6 +36,16 @@ AGENT_PATH = "/agent.v1.AgentService/Run"
 AGENT_CLIENT_VERSION = "3.19.13"
 AGENT_MODE_ASK = 2
 DEFAULT_WORKSPACE = "/tmp/sand-account"
+# 调用方工具在 Agent 侧的 MCP provider 标识；exec 回来时据此识别
+MCP_PROVIDER = "client-tools"
+# 请求以 tool 结果收尾时，本轮 run 仍需要一条 user 消息
+CONTINUE_TEXT = (
+    "上面 <conversation_history> 里最后的工具调用已经返回结果。"
+    "请直接基于这些结果继续完成任务并回答；不要用相同参数重复调用同一工具。"
+)
+HISTORY_PREFACE = "以下是本次对话此前的记录（含工具调用与结果），请直接延续："
+# 收到第一个 mcp exec 后再等一小段，把同一步的并行工具调用收齐再断流
+TOOL_GRACE_S = 0.6
 
 _tls = threading.local()
 
@@ -69,11 +89,200 @@ def _req_env() -> bytes:
     )
 
 
+def _tool_defs() -> list[bytes]:
+    return list(getattr(_tls, "tool_defs", None) or [])
+
+
 def _request_context() -> bytes:
     body = P.pb_bytes(4, _req_env())
+    # RequestContext.tools(7)：IDE 每次也把可用 MCP 工具放在这里
+    for d in _tool_defs():
+        body += P.pb_bytes(7, d)
     for f in (33, 36, 39, 40, 41, 42, 43, 44, 45):
         body += P.pb_bool(f, True)
     return body
+
+
+def _mcp_tool_defs(tools: Optional[list[dict]]) -> list[bytes]:
+    """OpenAI/Anthropic 工具 → agent.v1.McpToolDefinition 列表。"""
+    out: list[bytes] = []
+    for t in tools or []:
+        name = str(t.get("name") or "").strip()
+        if not name:
+            continue
+        schema = t.get("parameters") or {"type": "object"}
+        if isinstance(schema, dict) and set(schema) == {"jsonSchema"}:
+            schema = schema["jsonSchema"]
+        if not isinstance(schema, dict):
+            schema = {"type": "object"}
+        body = P.pb_str(1, name) + P.pb_str(2, str(t.get("description") or ""))
+        body += P.pb_bytes(3, P.pb_value(schema))
+        body += P.pb_str(4, MCP_PROVIDER) + P.pb_str(5, name)
+        body += P.pb_str(6, json.dumps(schema, ensure_ascii=False))
+        out.append(body)
+    return out
+
+
+def _text_item(text: str) -> bytes:
+    """ConversationHistory{User,Assistant,ToolResult}Content 的 text 分支。"""
+    return P.pb_bytes(1, P.pb_str(1, text))
+
+
+def _msg_text(msg: Any) -> str:
+    return "".join(p.text for p in msg.parts if p.kind == "text" and p.text)
+
+
+def _fold_history(dialog: list[Any], call_names: dict[str, str]) -> str:
+    """把此前对话（含工具调用/结果）折成文本。
+
+    实测 AgentService/Run 不把 UserMessageAction.conversation_history 喂给模型
+    （纯多轮也答"不知道"），所以历史必须进 user 文本；结构化 history 照发不误。
+    """
+    lines = ["<conversation_history>"]
+    for m in dialog:
+        if m.role == "user":
+            t = _msg_text(m)
+            if t.strip():
+                lines += ["[user]", t]
+        elif m.role == "assistant":
+            t = _msg_text(m)
+            if t.strip():
+                lines += ["[assistant]", t]
+            for p in m.parts:
+                if p.kind == "tool_call":
+                    lines.append(f"[tool_call {p.name} id={p.id}] {p.arguments or '{}'}")
+        for p in m.parts:
+            if p.kind != "tool_result":
+                continue
+            name = p.tool_name or call_names.get(p.tool_call_id, "")
+            flag = " error" if p.is_error else ""
+            lines += [f"[tool_result {name} id={p.tool_call_id}{flag}]", p.content or ""]
+    lines.append("</conversation_history>")
+    return "\n".join(lines)
+
+
+def _history_from_msgs(msgs: list[Any]) -> tuple[str, bytes]:
+    """内部 Msg 列表 → (本轮 user 文本, ConversationHistory 字节)。
+
+    system 并进本轮 user 文本（服务端会把 custom_system_prompt 当 CLI 参数）。
+    此前对话折成文本放在 user 文本前面；最后一条不是 user 文本时（以 tool 结果收尾），
+    用 CONTINUE_TEXT 顶上。
+    """
+    systems: list[str] = []
+    dialog: list[Any] = []
+    for m in msgs:
+        if m.role == "system":
+            t = _msg_text(m)
+            if t.strip():
+                systems.append(t)
+        else:
+            dialog.append(m)
+    call_names = {
+        p.id: p.name for m in dialog for p in m.parts if p.kind == "tool_call" and p.id
+    }
+
+    current_user = ""
+    if dialog and dialog[-1].role == "user" and _msg_text(dialog[-1]).strip():
+        last = dialog[-1]
+        current_user = _msg_text(last)
+        dialog = dialog[:-1]
+        tail = [p for p in last.parts if p.kind == "tool_result"]
+        if tail:
+            dialog.append(SimpleNamespace(role="tool", parts=tail))
+    elif dialog:
+        current_user = CONTINUE_TEXT
+    else:
+        current_user = systems.pop() if systems else "你好"
+
+    hist = b""
+    for m in dialog:
+        role = m.role
+        tool_results = [p for p in m.parts if p.kind == "tool_result"]
+        if role == "user":
+            items = b"".join(
+                P.pb_bytes(1, _text_item(p.text)) for p in m.parts if p.kind == "text" and p.text
+            )
+            if items:
+                hist += P.pb_bytes(1, P.pb_bytes(1, items))
+        elif role == "assistant":
+            items = b""
+            for p in m.parts:
+                if p.kind == "text" and p.text:
+                    items += P.pb_bytes(1, _text_item(p.text))
+                elif p.kind == "tool_call":
+                    call = P.pb_str(1, _restore_call_id(p.id)) + P.pb_str(2, p.name or "")
+                    call += P.pb_str(3, p.arguments or "{}")
+                    # content(1) → AssistantContent.tool_call(4)
+                    items += P.pb_bytes(1, P.pb_bytes(4, call))
+            if items:
+                hist += P.pb_bytes(1, P.pb_bytes(2, items))
+        for p in tool_results:
+            body = P.pb_str(1, _restore_call_id(p.tool_call_id))
+            body += P.pb_str(2, p.tool_name or call_names.get(p.tool_call_id, ""))
+            body += P.pb_bytes(3, _text_item(p.content or ""))
+            if p.is_error:
+                body += P.pb_bool(4, True)
+            hist += P.pb_bytes(1, P.pb_bytes(3, body))
+
+    if dialog:
+        current_user = HISTORY_PREFACE + "\n" + _fold_history(dialog, call_names) + "\n\n" + current_user
+    if systems:
+        current_user = "\n\n".join(systems) + "\n\n" + current_user
+    return current_user, hist
+
+
+def _export_call_id(raw: str) -> str:
+    """服务端的 tool_call_id 形如 'call-…-0\\nfc_…'，换行对外换成 %0A（可逆）。"""
+    return (raw or "").strip().replace("\n", "%0A")
+
+
+def _restore_call_id(ext: str) -> str:
+    return (ext or "").replace("%0A", "\n")
+
+
+def _value_py(parsed: dict) -> Any:
+    """google.protobuf.Value → Python。"""
+    if 3 in parsed:
+        return P.as_text(P.first(parsed, 3))
+    if 2 in parsed:
+        raw = P.first(parsed, 2)
+        if isinstance(raw, (bytes, bytearray)) and len(raw) == 8:
+            num = struct.unpack("<d", bytes(raw))[0]
+            return int(num) if float(num).is_integer() and abs(num) < 2**53 else num
+        return 0
+    if 4 in parsed:
+        return bool(P.first(parsed, 4))
+    if 5 in parsed:
+        return _struct_py(P.pb_parse(P.first(parsed, 5)))
+    if 6 in parsed:
+        lst = P.pb_parse(P.first(parsed, 6))
+        return [_value_py(P.pb_parse(v)) for _, v in lst.get(1, [])]
+    return None
+
+
+def _struct_py(parsed: dict, entry_field: int = 1) -> dict[str, Any]:
+    """Struct.fields / map<string, Value>：entry{key(1) value(2)}。"""
+    out: dict[str, Any] = {}
+    for _, entry in parsed.get(entry_field, []):
+        e = P.pb_parse(entry)
+        key = P.as_text(P.first(e, 1))
+        out[key] = _value_py(P.pb_parse(P.first(e, 2)))
+    return out
+
+
+def _mcp_exec_event(args: dict, index: int) -> dict[str, Any]:
+    """ExecServerMessage.mcp_args → 对外 tool_call 事件（单帧 complete）。"""
+    name = P.as_text(P.first(args, 5)) or P.as_text(P.first(args, 1))
+    call_id = _export_call_id(P.as_text(P.first(args, 3))) or ("call_" + uuid.uuid4().hex[:24])
+    payload = _struct_py(args, entry_field=2)
+    return {
+        "type": "tool_call",
+        "id": call_id,
+        "name": name,
+        "args": json.dumps(payload, ensure_ascii=False),
+        "complete": True,
+        "index": index,
+    }
 
 
 def _user_message(text: str) -> bytes:
@@ -138,16 +347,31 @@ def _split_turn(messages_pb: list[bytes]) -> tuple[str, list[tuple[str, str]]]:
     return user_text, prior
 
 
-def build_run_request(model: str, messages_pb: list[bytes]) -> bytes:
-    user_text, prior = _split_turn(messages_pb)
+def build_run_request(
+    model: str,
+    messages_pb: list[bytes],
+    msgs: Optional[list[Any]] = None,
+    tools: Optional[list[dict]] = None,
+) -> bytes:
+    if msgs:
+        user_text, hist = _history_from_msgs(msgs)
+    else:
+        user_text, prior = _split_turn(messages_pb)
+        hist = _conversation_history(prior) if prior else b""
+    tool_defs = _mcp_tool_defs(tools)
+    _tls.tool_defs = tool_defs
     uma = P.pb_bytes(1, _user_message(user_text))
     uma += P.pb_bytes(2, _request_context())
-    if prior:
-        uma += P.pb_bytes(7, _conversation_history(prior))
+    if hist:
+        uma += P.pb_bytes(7, hist)
     body = P.pb_bytes(1, _conv_state())
     body += P.pb_bytes(2, P.pb_bytes(1, uma))
+    if tool_defs:
+        body += P.pb_bytes(4, b"".join(P.pb_bytes(1, d) for d in tool_defs))
     body += P.pb_str(5, str(uuid.uuid4()))
     body += P.pb_bytes(9, _requested_model(model))
+    # 注意：exclude_workspace_context(12) 普通账号会被拒
+    # 「Workspace context exclusion is not allowed for this user, team, or selected model」
     body += P.pb_str(25, str(uuid.uuid4()))
     body += P.pb_str(26, str(uuid.uuid4()))
     return body
@@ -161,6 +385,8 @@ class _H2Bidi:
         self.conn = h2.connection.H2Connection()
         self.stream_id: Optional[int] = None
         self.buf = bytearray()
+        # 收到工具调用后设置：到点即停止读流（等并行调用收齐）
+        self.soft_deadline: Optional[float] = None
 
     def connect(self) -> None:
         ctx = ssl.create_default_context()
@@ -221,6 +447,8 @@ class _H2Bidi:
 
     def iter_frames(self, stop: threading.Event, deadline: float) -> Iterator[tuple[int, bytes]]:
         while time.time() < deadline and not stop.is_set():
+            if self.soft_deadline is not None and time.time() >= self.soft_deadline:
+                return
             events = self._recv_once()
             for ev in events:
                 if isinstance(ev, h2.events.ResponseReceived):
@@ -292,9 +520,13 @@ def iter_agent_events(
     agent_host: str = DEFAULT_AGENT_HOST,
     client_version: str = AGENT_CLIENT_VERSION,
     workspace: str = DEFAULT_WORKSPACE,
+    msgs: Optional[list[Any]] = None,
+    tools: Optional[list[dict]] = None,
 ) -> Iterator[dict[str, Any]]:
     stop = stop or threading.Event()
     _tls.workspace = workspace or DEFAULT_WORKSPACE
+    _tls.tool_defs = []
+    tool_calls = 0
     pc = P.Credentials(
         access_token=access_token,
         machine_id=machine_id,
@@ -306,7 +538,7 @@ def iter_agent_events(
     client = _H2Bidi(headers, agent_host or DEFAULT_AGENT_HOST)
     try:
         client.connect()
-        client.send_msg(P.pb_bytes(1, build_run_request(model, messages_pb)))
+        client.send_msg(P.pb_bytes(1, build_run_request(model, messages_pb, msgs, tools)))
         last_hb = time.time()
         for flag, payload in client.iter_frames(stop, time.time() + timeout):
             if time.time() - last_hb > 5:
@@ -314,6 +546,9 @@ def iter_agent_events(
                 last_hb = time.time()
             if flag & P.FLAG_END_STREAM:
                 trailer = payload.decode("utf-8", "replace").strip()
+                if tool_calls and trailer:
+                    # 工具调用已回给调用方，服务端随后的中止不算错误
+                    return
                 if trailer and trailer not in ("{}", ""):
                     info = _trailer_info(trailer)
                     msg = info.get("message") or trailer[:240]
@@ -334,9 +569,21 @@ def iter_agent_events(
                 exec_sid = P.as_text(P.first(em, 15))
                 if 10 in em:
                     client.send_msg(_exec_ctx_ok(eid, exec_sid))
+                elif 11 in em:
+                    # 调用方工具：不在这里执行，转成 tool_call 回给调用方，收齐并行调用后断流
+                    ev = _mcp_exec_event(P.pb_parse(P.first(em, 11)), tool_calls)
+                    tool_calls += 1
+                    client.soft_deadline = time.time() + TOOL_GRACE_S
+                    yield ev
                 else:
                     kinds = [k for k in em if k not in (1, 15, 19, 55, 57)]
-                    client.send_msg(_exec_throw(eid, f"unsupported exec {kinds}"))
+                    client.send_msg(
+                        _exec_throw(
+                            eid,
+                            "此环境没有本地文件系统和终端，只能使用对话中声明的工具"
+                            f"（unsupported exec {kinds}）",
+                        )
+                    )
             if 4 in top:
                 kv = P.pb_parse(P.first(top, 4))
                 kid = _first_int(kv, 1)
@@ -397,6 +644,8 @@ async def stream_account_events(
     agent_host: str = DEFAULT_AGENT_HOST,
     client_version: str = AGENT_CLIENT_VERSION,
     workspace: str = DEFAULT_WORKSPACE,
+    msgs: Optional[list[Any]] = None,
+    tools: Optional[list[dict]] = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     import asyncio
 
@@ -416,6 +665,8 @@ async def stream_account_events(
                 agent_host=agent_host,
                 client_version=client_version,
                 workspace=workspace,
+                msgs=msgs,
+                tools=tools,
             ):
                 q.put(ev)
         except Exception as exc:  # noqa: BLE001

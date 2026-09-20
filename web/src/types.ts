@@ -252,7 +252,7 @@ export const MODE_LABEL: Record<Mode, string> = {
 
 export const MODE_HINT: Record<Mode, string> = {
   bot: "走 Box relay，目前主要是 grok 系列。",
-  account: "走 Agent 推理，覆盖 Cursor 账号侧模型。",
+  account: "走 Agent 推理，消耗账号常规额度；客户端工具以 MCP 方式桥接。",
   "sand-direct": "以 sand 身份直连 api2。当前不可用，默认关闭。",
 };
 
