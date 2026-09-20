@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import queue
+import re
 import socket
 import ssl
 import struct
@@ -51,7 +52,16 @@ CONTINUE_TEXT = (
     "上面 <conversation_history> 里最后的工具调用已经返回结果。"
     "请直接基于这些结果继续完成任务并回答；不要用相同参数重复调用同一工具。"
 )
+CONTINUE_TAIL = "请直接执行下一步（调用下一个工具，或给出最终回答）。不要复述计划，不要从头重新开始。"
 HISTORY_PREFACE = "以下是本次对话此前的记录（含工具调用与结果），请直接延续："
+# 调用方声明了工具时，先把环境说清楚：Agent 侧没有内置终端，别去试内置 shell
+TOOLS_NOTE = (
+    "环境说明：本环境没有内置终端和文件系统，Agent 自带的 shell/文件工具在这里不可用。"
+    "调用方提供了这些工具：{names}。它们在用户本机执行，效果等同于本地终端和文件系统，"
+    "所有命令、读写和搜索都请直接通过它们完成。"
+)
+CLIP_HEAD = 360
+CLIP_TAIL = 240
 IMAGE_NOTE = (
     "注意：这次对话中出现过的全部图片（包括此前消息里的）都已作为附件附在本消息中，"
     "按出现顺序编号为 [image N]，文本里的 [image N] 就对应这些附件。"
@@ -233,6 +243,49 @@ def _has_user_content(msg: Any) -> bool:
     return any((p.kind == "text" and p.text.strip()) or p.kind == "image" for p in msg.parts)
 
 
+def _clip(text: str, head: int = CLIP_HEAD, tail: int = CLIP_TAIL) -> str:
+    text = (text or "").strip()
+    if len(text) <= head + tail + 8:
+        return text
+    return text[:head] + "\n…（中间省略）…\n" + text[-tail:]
+
+
+_USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.S)
+
+
+def _request_gist(text: str) -> str:
+    """用户消息里真正的诉求：有 <user_query> 就取它，否则首尾截断。"""
+    m = _USER_QUERY_RE.findall(text or "")
+    return _clip(m[-1]) if m else _clip(text)
+
+
+def _continue_text(dialog: list[Any], call_names: dict[str, str]) -> str:
+    """以工具结果收尾的续轮提示：把用户诉求和刚调过的工具放到结尾，避免模型从头重来。"""
+    last_user = ""
+    for m in reversed(dialog):
+        if m.role == "user":
+            t = _msg_text(m).strip()
+            if t:
+                last_user = t
+                break
+    names: list[str] = []
+    for m in reversed(dialog):
+        results = [p for p in m.parts if p.kind == "tool_result"]
+        if not results:
+            break
+        for p in results:
+            names.append(p.tool_name or call_names.get(p.tool_call_id, "") or "工具")
+    names.reverse()
+    lines = [CONTINUE_TEXT]
+    if last_user:
+        lines.append("用户最新的请求：" + _request_gist(last_user))
+    if names:
+        shown = "、".join(dict.fromkeys(names))
+        lines.append(f"你刚刚调用了 {shown}，结果就在上方 <conversation_history> 末尾的 [tool_result …] 里。")
+    lines.append(CONTINUE_TAIL)
+    return "\n".join(lines)
+
+
 def _history_from_msgs(msgs: list[Any]) -> tuple[str, bytes, list[tuple[bytes, str]]]:
     """内部 Msg 列表 → (本轮 user 文本, ConversationHistory 字节, 附图列表)。
 
@@ -255,9 +308,10 @@ def _history_from_msgs(msgs: list[Any]) -> tuple[str, bytes, list[tuple[bytes, s
 
     current: Optional[Any] = None
     if dialog and dialog[-1].role == "user" and _has_user_content(dialog[-1]):
-        current = dialog[-1]
+        last = dialog[-1]
+        current = last
         dialog = dialog[:-1]
-        tail = [p for p in current.parts if p.kind == "tool_result"]
+        tail = [p for p in last.parts if p.kind == "tool_result"]
         if tail:
             dialog.append(SimpleNamespace(role="tool", parts=tail))
 
@@ -268,7 +322,7 @@ def _history_from_msgs(msgs: list[Any]) -> tuple[str, bytes, list[tuple[bytes, s
         if not _msg_text(current).strip():
             current_user = current_user + "\n请看附图。"
     elif dialog:
-        current_user = CONTINUE_TEXT
+        current_user = _continue_text(dialog, call_names)
     else:
         current_user = systems.pop() if systems else "你好"
 
@@ -458,6 +512,9 @@ def build_run_request(
         hist = _conversation_history(prior) if prior else b""
     tool_defs = _mcp_tool_defs(tools)
     _tls.tool_defs = tool_defs
+    names = _tool_names(tools)
+    if names:
+        user_text = TOOLS_NOTE.format(names="、".join(names)) + "\n\n" + user_text
     try:
         import sand_server as SS  # noqa: PLC0415
 
@@ -541,7 +598,8 @@ class _H2Bidi:
         except socket.timeout:
             return []
         if not chunk:
-            return [h2.events.StreamEnded()]
+            # h2>=4.4 要求 stream_id；对端直接断开时按流结束处理
+            return [h2.events.StreamEnded(stream_id=self.stream_id or 0)]
         events = self.conn.receive_data(chunk)
         for ev in events:
             if isinstance(ev, h2.events.DataReceived):
@@ -593,6 +651,48 @@ class _H2Bidi:
             except Exception:
                 pass
             self.sock = None
+
+
+def _tool_names(tools: Optional[list[dict]]) -> list[str]:
+    out: list[str] = []
+    for t in tools or []:
+        name = str(t.get("name") or "").strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _unsupported_exec_message(kinds: list[int], names: list[str]) -> str:
+    """Agent 想跑自带的 shell/文件工具时的回绝语。
+
+    措辞很关键：早先只说"没有终端"，模型会理解成连调用方的 Shell 也不能用，
+    然后放弃执行命令、改去乱搜。这里明确指回调用方的工具。
+    """
+    if names:
+        listed = "、".join(names[:40])
+        return (
+            "这个内置工具在当前环境不可用（没有内置终端和文件系统），但调用方提供了等价工具："
+            f"{listed}。它们在用户本机执行，效果等同于本地终端和文件系统。"
+            "请改用这些工具完成同样的操作（命令用 Shell/Bash 类工具，读文件和搜索用 Read/Grep/Glob 类工具），"
+            f"不要说本机终端或 Shell 不可用。（unsupported exec {kinds}）"
+        )
+    return f"此环境没有本地文件系统和终端，只能使用对话中声明的工具（unsupported exec {kinds}）"
+
+
+def _exec_summary(em: dict, kinds: list[int]) -> str:
+    """把内置工具调用的结构压成一行日志，便于之后识别字段号。"""
+    parts: list[str] = []
+    for k in kinds[:3]:
+        try:
+            inner = P.pb_parse(P.first(em, k))
+            fields = []
+            for fk in sorted(inner)[:8]:
+                val = P.as_text(P.first(inner, fk))
+                fields.append(f"{fk}={val[:60]!r}" if val else str(fk))
+            parts.append(f"{k}:{{{', '.join(fields)}}}")
+        except Exception:  # noqa: BLE001
+            parts.append(f"{k}:?")
+    return " ".join(parts)[:400]
 
 
 def _kv_reply(kid: int, get_blob: bool) -> bytes:
@@ -684,13 +784,17 @@ def iter_agent_events(
                     yield ev
                 else:
                     kinds = [k for k in em if k not in (1, 15, 19, 55, 57)]
-                    client.send_msg(
-                        _exec_throw(
-                            eid,
-                            "此环境没有本地文件系统和终端，只能使用对话中声明的工具"
-                            f"（unsupported exec {kinds}）",
+                    names = _tool_names(tools)
+                    try:
+                        import sand_server as SS  # noqa: PLC0415
+
+                        SS._log(
+                            f"agent builtin exec rejected kinds={kinds} "
+                            f"client_tools={len(names)} {_exec_summary(em, kinds)}"
                         )
-                    )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    client.send_msg(_exec_throw(eid, _unsupported_exec_message(kinds, names)))
             if 4 in top:
                 kv = P.pb_parse(P.first(top, 4))
                 kid = _first_int(kv, 1)
