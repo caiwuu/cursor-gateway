@@ -52,7 +52,10 @@ CONTINUE_TEXT = (
     "请直接基于这些结果继续完成任务并回答；不要用相同参数重复调用同一工具。"
 )
 HISTORY_PREFACE = "以下是本次对话此前的记录（含工具调用与结果），请直接延续："
-IMAGE_NOTE = "对话中的图片已按 [image N] 编号随本消息附上，编号即附图顺序。"
+IMAGE_NOTE = (
+    "本消息附带了这次对话中出现过的全部图片（包括此前消息里的），按出现顺序编号为 [image N]；"
+    "文本里的 [image N] 指的就是这些附图，你现在可以直接查看它们。"
+)
 # 附图上限：超出时丢最早的，文本里标 [image 已省略]
 MAX_IMAGES = 10
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -453,6 +456,15 @@ def build_run_request(
         hist = _conversation_history(prior) if prior else b""
     tool_defs = _mcp_tool_defs(tools)
     _tls.tool_defs = tool_defs
+    try:
+        import sand_server as SS  # noqa: PLC0415
+
+        SS._log(
+            f"agent run tools={len(tool_defs)} images={len(images)} "
+            f"image_bytes={sum(len(d) for d, _ in images)} text_chars={len(user_text)}"
+        )
+    except Exception:  # noqa: BLE001
+        pass
     uma = P.pb_bytes(1, _user_message(user_text, images))
     uma += P.pb_bytes(2, _request_context())
     if hist:
