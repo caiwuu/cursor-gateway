@@ -301,12 +301,13 @@ def _history_from_msgs(msgs: list[Any]) -> tuple[str, bytes, list[tuple[bytes, s
                 body += P.pb_bool(4, True)
             hist += P.pb_bytes(1, P.pb_bytes(3, body))
 
+    if images:
+        # 放在问题紧前面：模型对结尾更敏感，不然容易忽略附图去找"文件"
+        current_user = IMAGE_NOTE + "\n\n" + current_user
     if dialog:
         current_user = (
             HISTORY_PREFACE + "\n" + _fold_history(dialog, call_names, image_index) + "\n\n" + current_user
         )
-    if images:
-        current_user = IMAGE_NOTE + "\n\n" + current_user
     if systems:
         current_user = "\n\n".join(systems) + "\n\n" + current_user
     return current_user, hist, images
