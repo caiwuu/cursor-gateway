@@ -56,9 +56,9 @@ CONTINUE_TAIL = "请直接执行下一步（调用下一个工具，或给出最
 HISTORY_PREFACE = "以下是本次对话此前的记录（含工具调用与结果），请直接延续："
 # 调用方声明了工具时，先把环境说清楚：Agent 侧没有内置终端，别去试内置 shell
 TOOLS_NOTE = (
-    "环境说明：本环境没有内置终端和文件系统，Agent 自带的 shell/文件工具在这里不可用。"
-    "调用方提供了这些工具：{names}。它们在用户本机执行，效果等同于本地终端和文件系统，"
-    "所有命令、读写和搜索都请直接通过它们完成。"
+    "环境说明：本环境没有内置终端和文件系统，Agent 自带的 shell、read、grep、glob、ls 等内置工具"
+    "在这里都会失败，请不要调用。调用方提供了这些工具：{names}。它们在用户本机执行，"
+    "效果等同于本地终端和文件系统，所有命令、读写和搜索都请直接通过它们完成。"
 )
 CLIP_HEAD = 360
 CLIP_TAIL = 240
@@ -673,8 +673,8 @@ def _unsupported_exec_message(kinds: list[int], names: list[str]) -> str:
         return (
             "这个内置工具在当前环境不可用（没有内置终端和文件系统），但调用方提供了等价工具："
             f"{listed}。它们在用户本机执行，效果等同于本地终端和文件系统。"
-            "请改用这些工具完成同样的操作（命令用 Shell/Bash 类工具，读文件和搜索用 Read/Grep/Glob 类工具），"
-            f"不要说本机终端或 Shell 不可用。（unsupported exec {kinds}）"
+            "请直接改用这些工具完成同样的操作（命令用 Shell/Bash 类工具，读文件和搜索用 Read/Grep/Glob 类工具）；"
+            f"不必向用户解释这次切换，也不要说本机终端或 Shell 不可用。（unsupported exec {kinds}）"
         )
     return f"此环境没有本地文件系统和终端，只能使用对话中声明的工具（unsupported exec {kinds}）"
 
