@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, App, Button, Card, Empty, Flex, Input, Select, Typography, theme } from "antd";
 import { DeleteOutlined, SendOutlined } from "@ant-design/icons";
 import { userApi } from "../../api";
+import { useAuth } from "../../auth";
 import { PageHeader } from "../../components/PageHeader";
 import type { GatewayToken, ShopInfo } from "../../types";
 
@@ -10,6 +11,7 @@ type ChatMsg = { role: "user" | "assistant"; content: string; thinking?: string 
 export default function Play() {
   const { token } = theme.useToken();
   const { message } = App.useApp();
+  const { me } = useAuth();
   const [shop, setShop] = useState<ShopInfo | null>(null);
   const [tokens, setTokens] = useState<GatewayToken[]>([]);
   const [tokenId, setTokenId] = useState("");
@@ -20,23 +22,27 @@ export default function Play() {
   const [error, setError] = useState("");
   const scroller = useRef<HTMLDivElement>(null);
 
+  const current = tokens.find((x) => x.id === tokenId);
+  const models = shop?.model_list || [];
+  const aliases = me?.model_aliases || {};
+
   useEffect(() => {
     Promise.all([userApi.shop(), userApi.tokens()]).then(([s, t]) => {
       setShop(s);
       setTokens(t.tokens);
       const first = t.tokens.find((x) => x.enabled) || t.tokens[0];
       if (first) setTokenId(first.id);
-      const models = s.model_list || [];
-      if (models.length) setModel(models[0]);
     });
   }, []);
 
   useEffect(() => {
+    if (model || !models.length) return;
+    setModel(aliases[models[0]] || models[0]);
+  }, [aliases, model, models]);
+
+  useEffect(() => {
     if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
   }, [msgs, busy]);
-
-  const current = tokens.find((x) => x.id === tokenId);
-  const models = shop?.model_list || [];
 
   async function send() {
     const text = prompt.trim();
@@ -129,7 +135,10 @@ export default function Play() {
             onChange={setModel}
             placeholder="选择模型"
             style={{ minWidth: 220 }}
-            options={models.map((m) => ({ value: m, label: m }))}
+            options={models.map((m) => {
+              const alias = aliases[m];
+              return { value: alias || m, label: alias ? `${alias} → ${m}` : m };
+            })}
           />
           {msgs.length > 0 && (
             <Button type="text" danger icon={<DeleteOutlined />} onClick={() => { setMsgs([]); setError(""); message.success("已清空"); }}>

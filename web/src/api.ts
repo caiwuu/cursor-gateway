@@ -190,4 +190,9 @@ export const userApi = {
       method: "PUT",
       body: JSON.stringify({ old_password: oldPassword, password }),
     }),
+  saveModelAliases: (aliases: Record<string, string>) =>
+    userReq<{ ok: boolean; model_aliases: Record<string, string> }>("/api/user/model-aliases", {
+      method: "PUT",
+      body: JSON.stringify({ aliases }),
+    }),
 };

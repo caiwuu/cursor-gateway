@@ -192,6 +192,7 @@ export interface GatewayUser {
   token_count: number;
   session?: string;
   shop?: ShopInfo;
+  model_aliases?: Record<string, string>;
 }
 
 export interface RedeemCard {

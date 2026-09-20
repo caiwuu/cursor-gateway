@@ -101,7 +101,8 @@ CREATE TABLE IF NOT EXISTS users (
     enabled INTEGER NOT NULL DEFAULT 1,
     balance INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    model_aliases TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS user_sessions (
@@ -163,6 +164,7 @@ _API_TOKEN_COLUMNS = (
 
 _USER_COLUMNS = (
     ("role", "TEXT NOT NULL DEFAULT 'user'"),
+    ("model_aliases", "TEXT NOT NULL DEFAULT '{}'"),
 )
 
 _REDEEM_CARD_COLUMNS = (

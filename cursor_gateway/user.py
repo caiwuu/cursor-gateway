@@ -8,7 +8,13 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from . import captcha as CP
 from .accounts import micros_to_yuan, usage_cost_micros, verify_password
-from .models import enabled_modes, models_for_mode, official_price_for_model, price_for_model
+from .models import (
+    enabled_modes,
+    models_for_mode,
+    official_price_for_model,
+    parse_user_model_aliases,
+    price_for_model,
+)
 from .store import Store
 
 router = APIRouter(prefix="/api/user")
@@ -183,6 +189,21 @@ def logout(request: Request) -> dict[str, Any]:
 def me(request: Request) -> dict[str, Any]:
     user = _current_user(request)
     return _user_payload(_store(request), user)
+
+
+@router.put("/model-aliases")
+def save_model_aliases(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    user = _current_user(request)
+    store = _store(request)
+    catalog = _available_models(store, store.get_app_settings())
+    try:
+        aliases = parse_user_model_aliases(body, catalog=catalog)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    updated = store.update_user(user.id, {"model_aliases": aliases})
+    if updated is None:
+        raise HTTPException(404, "用户不存在")
+    return {"ok": True, "model_aliases": updated.public_dict().get("model_aliases") or {}}
 
 
 @router.put("/password")

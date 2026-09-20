@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
+
+_ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$")
 
 MODES = ("bot", "account", "sand-direct")
 DEFAULT_BACKEND = "https://api2.cursor.sh"
@@ -170,6 +173,96 @@ def models_for_mode(config: Any, mode: str) -> list[str]:
     if mode not in cfg:
         return []
     return list(cfg[mode]["models"] if cfg[mode]["enabled"] else [])
+
+
+def aliases_by_model(aliases: Any) -> dict[str, str]:
+    """内部 {别名: 真实模型} → 控制台用的 {真实模型: 别名}。"""
+    src = aliases if isinstance(aliases, dict) else {}
+    out: dict[str, str] = {}
+    for alias, target in src.items():
+        name = str(alias or "").strip()
+        model = str(target or "").strip()
+        if name and model:
+            out[model] = name
+    return out
+
+
+def apply_model_alias(name: str, aliases: Any) -> str:
+    text = (name or "").strip()
+    if not text:
+        return ""
+    src = aliases if isinstance(aliases, dict) else {}
+    mapped = src.get(text)
+    return str(mapped).strip() if mapped else text
+
+
+def public_model_names(models: list[str], aliases: Any) -> list[str]:
+    """对外模型列表：设了别名的用别名，没设的仍用真实 id。"""
+    by_real = aliases_by_model(aliases)
+    out: list[str] = []
+    seen: set[str] = set()
+    for real in models:
+        name = by_real.get(real) or real
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def normalize_model_aliases(raw: Any, *, catalog: Any = None) -> dict[str, str]:
+    """内部存储形态：{别名: 真实模型}。坏数据直接丢掉。"""
+    src = raw if isinstance(raw, dict) else {}
+    permit = set(normalize_model_list(catalog)) if catalog is not None else None
+    out: dict[str, str] = {}
+    taken: dict[str, str] = {}
+    for key, val in src.items():
+        alias = str(key or "").strip()
+        target = str(val or "").strip()
+        if not alias or not target or alias == target:
+            continue
+        if not _ALIAS_RE.match(alias):
+            continue
+        if permit is not None and target not in permit:
+            continue
+        if permit is not None and alias in permit:
+            continue
+        old = taken.get(target)
+        if old:
+            out.pop(old, None)
+        out[alias] = target
+        taken[target] = alias
+    return out
+
+
+def parse_user_model_aliases(raw: Any, *, catalog: list[str]) -> dict[str, str]:
+    """控制台提交 {真实模型: 别名}，校验后转成 {别名: 真实模型}。"""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("别名必须是 JSON 对象")
+    data = raw["aliases"] if isinstance(raw.get("aliases"), dict) else raw
+    allowed = set(catalog)
+    model_to_alias: dict[str, str] = {}
+    used: set[str] = set()
+    for key, val in data.items():
+        model = str(key or "").strip()
+        alias = str(val or "").strip()
+        if not model:
+            continue
+        if model not in allowed:
+            raise ValueError(f"未知模型 {model}")
+        if not alias or alias == model:
+            continue
+        if not _ALIAS_RE.match(alias):
+            raise ValueError(f"别名「{alias}」格式无效：以字母或数字开头，可含 . _ : / -，最长 64 位")
+        if alias in allowed:
+            raise ValueError(f"别名「{alias}」和已有模型 id 冲突")
+        if alias in used:
+            raise ValueError(f"别名「{alias}」已被占用")
+        used.add(alias)
+        model_to_alias[model] = alias
+    return {alias: model for model, alias in model_to_alias.items()}
 
 
 def modes_for_model(config: Any, model: str = "", requested: str = "") -> list[str]:
@@ -347,6 +440,7 @@ class UserRecord:
     created_at: int = 0
     updated_at: int = 0
     token_count: int = 0
+    model_aliases: dict[str, str] = field(default_factory=dict)
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -359,6 +453,7 @@ class UserRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "token_count": self.token_count,
+            "model_aliases": aliases_by_model(self.model_aliases),
         }
 
 

@@ -24,11 +24,13 @@ from .credentials import (
 )
 from .accounts import usage_cost_micros
 from .models import (
+    apply_model_alias,
     effective_mode,
     enabled_modes,
     models_for_mode,
     normalize_mode_config,
     price_for_model,
+    public_model_names,
 )
 from .paths import ensure_sys_path
 from .runtime import NodeRuntime, Registry
@@ -182,7 +184,7 @@ async def resolve_creds(rt: NodeRuntime, request: Request, mode: str, body: Opti
 
 async def _read_json(request: Request) -> dict:
     cached_err = getattr(request.state, "json_error", None)
-    if isinstance(cached_err, UpstreamError):
+    if isinstance(cached_err, Exception):
         raise cached_err
     cached = getattr(request.state, "json_body", None)
     if isinstance(cached, dict):
@@ -201,6 +203,34 @@ async def _read_json(request: Request) -> dict:
     return payload
 
 
+def _user_model_aliases(request: Request) -> dict[str, str]:
+    cached = getattr(request.state, "model_aliases", None)
+    if isinstance(cached, dict):
+        return cached
+    aliases: dict[str, str] = {}
+    store = _store_of(request)
+    if store is not None:
+        user_id = str(getattr(request.state, "gateway_user_id", "") or "")
+        user = store.get_user(user_id) if user_id else None
+        if user is None:
+            rec = store.get_token(_bearer_token(request))
+            if rec is not None and rec.user_id:
+                user = store.get_user(rec.user_id)
+        if user is not None:
+            aliases = dict(user.model_aliases or {})
+    request.state.model_aliases = aliases
+    return aliases
+
+
+def _resolve_payload_model(request: Request, raw: Any) -> str:
+    name = apply_model_alias(str(raw or "").strip(), _user_model_aliases(request))
+    return SS._resolve_model_slug(name) if name else ""
+
+
+def _listed_models(request: Request, items: list[str]) -> dict:
+    return _models_body(public_model_names(items, _user_model_aliases(request)))
+
+
 async def _request_model(request: Request) -> str:
     cached = getattr(request.state, "resolved_model", None)
     if isinstance(cached, str):
@@ -211,7 +241,7 @@ async def _request_model(request: Request) -> str:
         request.state.resolved_model = ""
         return ""
     raw = str(payload.get("model") or "").strip()
-    model = SS._resolve_model_slug(raw) if raw else ""
+    model = _resolve_payload_model(request, raw) if raw else ""
     request.state.resolved_model = model
     return model
 
@@ -700,10 +730,11 @@ def _sse_output_delta(chunk: str) -> str:
             for tc in delta.get("tool_calls") or []:
                 if isinstance(tc, dict):
                     pieces.append(str((tc.get("function") or {}).get("arguments") or ""))
-        delta = obj.get("delta") if isinstance(obj.get("delta"), dict) else {}
-        pieces.append(str(delta.get("text") or ""))
-        pieces.append(str(delta.get("thinking") or ""))
-        pieces.append(str(delta.get("partial_json") or ""))
+        raw_delta = obj.get("delta")
+        extra = raw_delta if isinstance(raw_delta, dict) else {}
+        pieces.append(str(extra.get("text") or ""))
+        pieces.append(str(extra.get("thinking") or ""))
+        pieces.append(str(extra.get("partial_json") or ""))
     return "".join(pieces)
 
 
@@ -885,7 +916,7 @@ async def _handle_chat(request: Request, mode: str, rt: NodeRuntime):
         _log_req(rt, mode, model, "openai", stream, exc.status, started, exc.message, token_id=token_id)
         return SS._openai_error_response(exc)
 
-    model = SS._resolve_model_slug(payload.get("model") or _default_model_for(rt, mode))
+    model = _resolve_payload_model(request, payload.get("model") or _default_model_for(rt, mode))
     payload["model"] = model
     try:
         mode = _assert_mode_ready(rt, mode, model)
@@ -1042,7 +1073,7 @@ async def _handle_messages(request: Request, mode: str, rt: NodeRuntime):
         _log_req(rt, mode, model, "anthropic", stream, exc.status, started, exc.message, token_id=token_id)
         return SS._anthropic_error_response(exc)
 
-    model = SS._resolve_model_slug(payload.get("model") or _default_model_for(rt, mode))
+    model = _resolve_payload_model(request, payload.get("model") or _default_model_for(rt, mode))
     payload["model"] = model
     try:
         mode = _assert_mode_ready(rt, mode, model)
@@ -1387,11 +1418,11 @@ def build_gateway_router(get_rt, *, with_node_prefix: bool, include_root: bool =
                     items = models_for_mode(rt.record.mode_config, mode)
                 else:
                     items = _collect_models([rt.record], "")
-                return _models_body(items)
+                return _listed_models(request, items)
         except UpstreamError as exc:
             return SS._openai_error_response(exc)
         records = [rt.record for rt in registry.runtimes.values() if registry.eligible(rt, mode)]
-        return _models_body(_collect_models(records, mode))
+        return _listed_models(request, _collect_models(records, mode))
 
     @router.post(pre + "/v1/provision")
     async def default_provision(request: Request, node_ref: Optional[str] = None):
@@ -1425,7 +1456,7 @@ def build_gateway_router(get_rt, *, with_node_prefix: bool, include_root: bool =
 
             @router.get(pre)
             @router.get(pre + "/")
-            async def node_root(request: Request, node_ref: Optional[str] = None):
+            async def node_root_prefixed(request: Request, node_ref: Optional[str] = None):
                 return node_info(await _rt(request, node_ref))
 
         else:

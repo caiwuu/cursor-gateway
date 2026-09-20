@@ -1,0 +1,8 @@
+{
+  "include": ["cursor_gateway", "run.py"],
+  "extraPaths": ["vendor/sand"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "basic"
+}

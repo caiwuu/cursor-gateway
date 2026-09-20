@@ -36,6 +36,7 @@ from .models import (
     default_mode_config,
     is_placeholder_secret,
     normalize_mode_config,
+    normalize_model_aliases,
     normalize_model_list,
     normalize_model_prices,
     normalize_shop_url,
@@ -153,6 +154,20 @@ def _row_text(row, key: str, default: str = "") -> str:
     except (KeyError, IndexError):
         return default
     return default if value is None else str(value)
+
+
+def _row_json_dict(row, key: str) -> dict:
+    try:
+        raw = row[key]
+    except (KeyError, IndexError):
+        return {}
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _card_enabled(row) -> bool:
@@ -1195,6 +1210,7 @@ class Store:
             created_at=int(row["created_at"] or 0),
             updated_at=int(row["updated_at"] or 0),
             token_count=_int(row, "token_count"),
+            model_aliases=normalize_model_aliases(_row_json_dict(row, "model_aliases")),
         )
 
     def has_admin(self) -> bool:
@@ -1321,6 +1337,12 @@ class Store:
                 self.conn.execute(
                     "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
                     (hash_password(str(password)), _now(), current.id),
+                )
+            if "model_aliases" in payload:
+                aliases = normalize_model_aliases(payload.get("model_aliases"))
+                self.conn.execute(
+                    "UPDATE users SET model_aliases = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(aliases, ensure_ascii=False), _now(), current.id),
                 )
             self.conn.commit()
         return self.get_user(current.id)
