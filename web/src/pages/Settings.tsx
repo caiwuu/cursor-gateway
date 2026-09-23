@@ -8,9 +8,11 @@ import {
   AppstoreOutlined,
 } from "@ant-design/icons";
 import { api } from "../api";
+import { useAuth } from "../auth";
 import { PageHeader } from "../components/PageHeader";
 import { SettingRow } from "../components/SettingRow";
 import {
+  DEFAULT_PRODUCT_NAME,
   DEFAULT_MODEL_LIST,
   MODE_HINT,
   MODE_LABEL,
@@ -30,6 +32,7 @@ type SettingsForm = Pick<
   | "host"
   | "port"
   | "shop_url"
+  | "product_name"
   | "model_list"
   | "mode_defaults"
 >;
@@ -56,6 +59,7 @@ function fillPrices(
 export default function Settings() {
   const { token } = theme.useToken();
   const { message } = App.useApp();
+  const { refresh } = useAuth();
   const [meta, setMeta] = useState<AppMeta | null>(null);
   const [form] = Form.useForm<SettingsForm>();
   const [error, setError] = useState("");
@@ -72,6 +76,7 @@ export default function Settings() {
           host: s.host,
           port: s.port,
           shop_url: s.shop_url || "",
+          product_name: s.product_name || DEFAULT_PRODUCT_NAME,
           model_list: list,
           mode_defaults: normalizeModeConfig(s.mode_defaults, list),
         });
@@ -118,6 +123,7 @@ export default function Settings() {
         host: values.host,
         port: values.port,
         shop_url: values.shop_url || "",
+        product_name: values.product_name || DEFAULT_PRODUCT_NAME,
         model_list: list,
         mode_defaults: defaults,
       });
@@ -125,9 +131,11 @@ export default function Settings() {
         host: saved.host,
         port: saved.port,
         shop_url: saved.shop_url || "",
+        product_name: saved.product_name || DEFAULT_PRODUCT_NAME,
         model_list: saved.model_list,
         mode_defaults: saved.mode_defaults,
       });
+      await refresh();
       message.success("已保存。模型列表和商店地址立即生效；监听地址需重启后端后生效。");
     } catch (e) {
       setError(String((e as Error).message || e));
@@ -193,6 +201,12 @@ export default function Settings() {
           className="premium-card"
           style={{ borderRadius: 12 }}
         >
+          <SettingRow title="产品名称" desc="显示在首页、登录页和用户控制台。留空则使用 cursor-gateway。">
+            <Form.Item name="product_name" noStyle>
+              <Input placeholder={DEFAULT_PRODUCT_NAME} maxLength={40} style={{ width: "100%", maxWidth: 320, borderRadius: 6 }} />
+            </Form.Item>
+          </SettingRow>
+          <Divider style={{ margin: "16px 0" }} />
           <SettingRow title="本地监听地址" desc="管理台及网关分发服务绑定的 HOST 和 PORT。修改后需要重启后端进程才能生效。">
             <div style={{ display: "flex", gap: 8, width: "100%", maxWidth: 320 }}>
               <Form.Item name="host" noStyle>

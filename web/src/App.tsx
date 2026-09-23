@@ -23,6 +23,7 @@ import ConsoleApp from "./pages/console/ConsoleApp";
 import Login from "./pages/Login";
 import { CommandPalette } from "./components/CommandPalette";
 import { useAuth } from "./auth";
+import { productNameOf } from "./types";
 import { DashboardShell } from "./components/DashboardShell";
 
 const NAV = [
@@ -59,10 +60,17 @@ export default function App() {
   const { token } = theme.useToken();
   const [cmd, setCmd] = useState(false);
   const { me, shop, ready, logout: authLogout } = useAuth();
+  const brand = productNameOf(shop);
   const current = selectedKey(loc.pathname);
   const fill = loc.pathname.startsWith("/playground");
   const kbd = isMac() ? "⌘K" : "Ctrl K";
   const sectionLabel = NAV.find((item) => item.key === current)?.label || "管理台";
+
+  useEffect(() => {
+    if (me?.role !== "admin") return;
+    if (loc.pathname === "/" || loc.pathname.startsWith("/console") || isAuthPath(loc.pathname)) return;
+    document.title = `${sectionLabel} · ${brand}`;
+  }, [me, loc.pathname, sectionLabel, brand]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -121,7 +129,7 @@ export default function App() {
 
   return (
     <DashboardShell
-      brand="Cursor Gateway"
+      brand={brand}
       brandHint="ADMIN CONSOLE"
       nav={NAV}
       current={current}

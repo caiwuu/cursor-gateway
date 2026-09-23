@@ -5,12 +5,14 @@ import { ApiOutlined, ArrowRightOutlined, CheckCircleFilled, MoonOutlined, Reloa
 import { setUserSession, userApi } from "../api";
 import { useAuth } from "../auth";
 import { useThemeMode } from "../theme";
+import { productNameOf } from "../types";
 
 export default function Login({ mode }: { mode: "login" | "register" | "setup" }) {
   const { mode: themeMode, toggle: toggleTheme } = useThemeMode();
   const { message } = App.useApp();
   const nav = useNavigate();
   const { shop, setMe } = useAuth();
+  const brand = productNameOf(shop);
   const [form] = Form.useForm();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -30,8 +32,8 @@ export default function Login({ mode }: { mode: "login" | "register" | "setup" }
 
   useEffect(() => {
     document.title =
-      mode === "setup" ? "初始化管理台 · Cursor Gateway" : `${mode === "register" ? "注册" : "登录"} · OhMyAPI`;
-  }, [mode]);
+      mode === "setup" ? `初始化管理台 · ${brand}` : `${mode === "register" ? "注册" : "登录"} · ${brand}`;
+  }, [mode, brand]);
 
   useEffect(() => {
     if (!needCaptcha) return;
@@ -80,7 +82,7 @@ export default function Login({ mode }: { mode: "login" | "register" | "setup" }
           <div className="login-story-glow login-story-glow-two" />
           <div className="login-brand">
             <span className="login-brand-mark"><ApiOutlined /></span>
-            <span>{mode === "setup" ? "Cursor Gateway" : "OhMyAPI"}</span>
+            <span>{brand}</span>
           </div>
           <div className="login-story-copy">
             <span className="login-overline">按用量付费的 AI 模型服务</span>

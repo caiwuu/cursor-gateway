@@ -3,14 +3,20 @@ import { App, Button, Card, Flex, Input, Table, Typography } from "antd";
 import { userApi } from "../../api";
 import { useAuth } from "../../auth";
 import { PageHeader } from "../../components/PageHeader";
-import type { ShopModel } from "../../types";
+import { aliasPrefixOf, productNameOf, type ShopModel } from "../../types";
 
 export default function Models() {
   const { message } = App.useApp();
   const { me, shop, setMe } = useAuth();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
-  const [prefix, setPrefix] = useState("ohmy-");
+  const suggestedPrefix = aliasPrefixOf(productNameOf(shop));
+  const [prefix, setPrefix] = useState(suggestedPrefix);
+  const [prefixEdited, setPrefixEdited] = useState(false);
+
+  useEffect(() => {
+    if (!prefixEdited) setPrefix(suggestedPrefix);
+  }, [suggestedPrefix, prefixEdited]);
 
   useEffect(() => {
     setDrafts(me?.model_aliases || {});
@@ -94,7 +100,15 @@ export default function Models() {
           <Typography.Text type="secondary" style={{ fontSize: 13 }}>
             给还没起别名的模型加前缀
           </Typography.Text>
-          <Input value={prefix} onChange={(e) => setPrefix(e.target.value)} style={{ width: 140 }} placeholder="ohmy-" />
+          <Input
+            value={prefix}
+            onChange={(e) => {
+              setPrefixEdited(true);
+              setPrefix(e.target.value);
+            }}
+            style={{ width: 160 }}
+            placeholder={suggestedPrefix || "别名前缀"}
+          />
           <Button onClick={applyPrefix}>应用到空别名</Button>
         </Flex>
       </Card>

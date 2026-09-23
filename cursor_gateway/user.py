@@ -70,6 +70,7 @@ def _shop_view(store: Store, settings) -> dict[str, Any]:
         "allow_register": bool(settings.allow_register),
         "need_setup": not store.has_admin(),
         "shop_url": settings.shop_url,
+        "product_name": settings.product_name,
         "input_price_per_1m": settings.input_price_per_1m,
         "output_price_per_1m": settings.output_price_per_1m,
         "currency": "CNY",

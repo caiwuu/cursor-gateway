@@ -10,6 +10,7 @@ import {
   UserOutlined,
 } from "@ant-design/icons";
 import { useAuth } from "../../auth";
+import { productNameOf } from "../../types";
 import { DashboardShell } from "../../components/DashboardShell";
 import Home from "./Home";
 import Keys from "./Keys";
@@ -39,13 +40,14 @@ function selectedKey(pathname: string) {
 export default function ConsoleApp() {
   const loc = useLocation();
   const nav = useNavigate();
-  const { me, logout: authLogout } = useAuth();
+  const { me, shop, logout: authLogout } = useAuth();
+  const brand = productNameOf(shop);
   const current = selectedKey(loc.pathname);
   const sectionLabel = NAV.find((item) => item.key === current)?.label || "用户台";
 
   useEffect(() => {
-    document.title = `${sectionLabel} · OhMyAPI`;
-  }, [sectionLabel]);
+    document.title = `${sectionLabel} · ${brand}`;
+  }, [sectionLabel, brand]);
 
   async function logout() {
     await authLogout();
@@ -54,7 +56,7 @@ export default function ConsoleApp() {
 
   return (
     <DashboardShell
-      brand="OhMyAPI"
+      brand={brand}
       brandHint="USER CONSOLE"
       nav={NAV}
       current={current}

@@ -13,7 +13,7 @@ import {
 } from "@ant-design/icons";
 import { useAuth } from "../auth";
 import { useThemeMode } from "../theme";
-import type { ShopModel } from "../types";
+import { productNameOf, type ShopModel } from "../types";
 import "./landing.css";
 
 const FAMILIES: [RegExp, string][] = [
@@ -79,9 +79,10 @@ const FAQ = [
 export default function Home() {
   const { me, shop } = useAuth();
   const { mode, toggle } = useThemeMode();
+  const brand = productNameOf(shop);
 
   useEffect(() => {
-    document.title = "OhMyAPI · 多模型 API 聚合服务";
+    document.title = `${brand} · 多模型 API 聚合服务`;
     let meta = document.querySelector<HTMLMetaElement>('meta[name="description"]');
     if (!meta) {
       meta = document.createElement("meta");
@@ -89,7 +90,7 @@ export default function Home() {
       document.head.appendChild(meta);
     }
     meta.content = "一个 API Key 调用多家主流模型。兼容 OpenAI 与 Anthropic 接口，按 token 用量计费。";
-  }, []);
+  }, [brand]);
 
   const models: ShopModel[] = useMemo(() => {
     if (!shop) return [];
@@ -141,7 +142,7 @@ export default function Home() {
               <ApiOutlined />
             </span>
             <span>
-              OhMyAPI
+              {brand}
               <small>UNIFIED MODEL API</small>
             </span>
           </Link>
@@ -186,7 +187,7 @@ export default function Home() {
                   按量计费 · 余额长期有效
                 </p>
                 <h1 className="landing-h1">
-                  <em>OhMyAPI</em>
+                  <em>{brand}</em>
                 </h1>
                 <p className="landing-lead">
                   兼容 OpenAI 和 Anthropic 接口。已有项目只需替换 Base URL 和 API Key，即可调用{" "}
@@ -508,7 +509,7 @@ export default function Home() {
 
       <footer className="landing-footer">
         <div className="landing-container landing-footer-inner">
-          <span>© {new Date().getFullYear()} OhMyAPI</span>
+          <span>© {new Date().getFullYear()} {brand}</span>
           <nav>
             <a href="#pricing">模型价格</a>
             <Link to="/login">登录</Link>

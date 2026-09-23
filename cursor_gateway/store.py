@@ -39,6 +39,7 @@ from .models import (
     normalize_model_aliases,
     normalize_model_list,
     normalize_model_prices,
+    normalize_product_name,
     normalize_shop_url,
 )
 from .paths import db_path, legacy_settings_path
@@ -299,6 +300,7 @@ class Store:
                 mode_defaults=mode_defaults,
                 allow_register=_as_bool(self._setting("allow_register", "1"), True),
                 shop_url=normalize_shop_url(self._setting("shop_url", "")),
+                product_name=normalize_product_name(self._setting("product_name", "")),
                 input_price_per_1m=default_in,
                 output_price_per_1m=default_out,
                 model_prices=model_prices,
@@ -314,6 +316,7 @@ class Store:
             "mode_defaults",
             "allow_register",
             "shop_url",
+            "product_name",
             "input_price_per_1m",
             "output_price_per_1m",
             "model_prices",
@@ -360,6 +363,9 @@ class Store:
                     continue
                 if key == "shop_url":
                     self._set_setting(key, normalize_shop_url(value))
+                    continue
+                if key == "product_name":
+                    self._set_setting(key, normalize_product_name(value))
                     continue
                 if key in {"input_price_per_1m", "output_price_per_1m"}:
                     self._set_setting(key, str(_as_float(value, 0.0)))

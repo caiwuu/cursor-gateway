@@ -82,6 +82,7 @@ export interface AppMeta {
   default_mode_config?: ModeConfig;
   allow_register?: boolean;
   shop_url?: string;
+  product_name?: string;
   input_price_per_1m?: number;
   output_price_per_1m?: number;
   model_prices?: ModelPrices;
@@ -97,6 +98,7 @@ export interface AppSettings {
   mode_defaults: ModeConfig;
   allow_register: boolean;
   shop_url?: string;
+  product_name?: string;
   input_price_per_1m: number;
   output_price_per_1m: number;
   model_prices: ModelPrices;
@@ -168,10 +170,29 @@ export interface ShopModel {
   official_output_price_per_1m?: number;
 }
 
+export const DEFAULT_PRODUCT_NAME = "cursor-gateway";
+
+export function productNameOf(source?: { product_name?: string } | null) {
+  const name = (source?.product_name || "").trim();
+  return name || DEFAULT_PRODUCT_NAME;
+}
+
+export function aliasPrefixOf(name: string) {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9._-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return slug ? `${slug}-` : "";
+}
+
 export interface ShopInfo {
   allow_register: boolean;
   need_setup?: boolean;
   shop_url?: string;
+  product_name?: string;
   input_price_per_1m: number;
   output_price_per_1m: number;
   currency: string;

@@ -304,6 +304,7 @@ def effective_mode(
 DEFAULT_AGENT_HOST = "agentn.global.api5.cursor.sh"
 DEFAULT_LISTEN_HOST = "0.0.0.0"
 DEFAULT_APP_PORT = 8788
+DEFAULT_PRODUCT_NAME = "cursor-gateway"
 DEFAULT_NODE_PORT_START = 8799
 
 
@@ -380,9 +381,20 @@ class AppSettings:
     mode_defaults: dict[str, Any] = field(default_factory=default_mode_config)
     allow_register: bool = True
     shop_url: str = ""
+    product_name: str = DEFAULT_PRODUCT_NAME
     input_price_per_1m: float = 2.0
     output_price_per_1m: float = 8.0
     model_prices: dict[str, dict[str, float]] = field(default_factory=dict)
+
+
+def normalize_product_name(raw: Any = "") -> str:
+    name = " ".join(str(raw or "").split())
+    if not name:
+        return DEFAULT_PRODUCT_NAME
+    name = name[:40].rstrip()
+    if not name or any(ch in name for ch in "<>&\"'`/\\"):
+        return DEFAULT_PRODUCT_NAME
+    return name
 
 
 def normalize_shop_url(raw: Any = "") -> str:
